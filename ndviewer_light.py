@@ -1,16 +1,18 @@
 """
-Lightweight NDViewer - Fast, minimal viewer for multi-dimensional microscopy data.
+Lightweight NDViewer -write context here.
 
-Supports: OME-TIFF and single-TIFF acquisitions with lazy loading via dask.
+Supports: OME-TIFF and single-TIFF acquisitions with lazy loading via dask (specify how it is faster).
 """
 
 import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+
 import numpy as np
 
-# Core dependencies
+
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QMainWindow, 
                              QPushButton, QFileDialog, QApplication)
 from PyQt5.QtCore import Qt
@@ -20,28 +22,54 @@ from PyQt5.QtGui import QPalette, QColor
 try:
     import ndv
     NDV_AVAILABLE = True
+    # Monkeypatch superqt slider to respect full ranges (self-contained)
+    try:
+        from superqt.sliders import QLabeledSlider
+        if not getattr(QLabeledSlider, "_ndv_range_patch", False):
+            _orig_setRange = QLabeledSlider.setRange
+            def _patched_setRange(self, a, b):
+                _orig_setRange(self, a, b)
+                if hasattr(self, "_slider"):
+                    self._slider.setMinimum(a)
+                    self._slider.setMaximum(b)
+                if hasattr(self, "_label"):
+                    try:
+                        self._label.setRange(a, b)
+                    except Exception:
+                        pass
+            QLabeledSlider.setRange = _patched_setRange
+            QLabeledSlider._ndv_range_patch = True
+    except Exception:
+        pass
 except ImportError:
     NDV_AVAILABLE = False
 
-# Lazy loading stack
+# Lazy loading
 try:
     import tifffile as tf
     import xarray as xr
     import dask.array as da
     from dask import delayed
-    DASK_AVAILABLE = True
+    from functools import lru_cache
+    LAZY_LOADING_AVAILABLE = True
 except ImportError:
-    DASK_AVAILABLE = False
+    LAZY_LOADING_AVAILABLE = False
 
 # Filename patterns (from common.py)
 FPATTERN = re.compile(r"(?P<r>[^_]+)_(?P<f>\d+)_(?P<z>\d+)_(?P<c>.+)\.tiff?", re.IGNORECASE)
 FPATTERN_OME = re.compile(r"(?P<r>[^_]+)_(?P<f>\d+)\.ome\.tiff?", re.IGNORECASE)
 
 
-def extract_wavelength(channel_str: str) -> int:
-    """Extract wavelength (nm) from channel string."""
+# Helper functions
+def extract_wavelength(channel_str: str):
+    """Extract wavelength (nm) from channel string; None if unknown."""
+    if not channel_str:
+        return None
+    lower = channel_str.lower()
+    if re.fullmatch(r'ch\d+', lower):
+        return None
     # Direct wavelength pattern
-    if m := re.search(r'(\d{3,4})\s*nm', channel_str, re.IGNORECASE):
+    if m := re.search(r'(\d{3,4})[ _]*nm', channel_str, re.IGNORECASE):
         return int(m.group(1))
     
     # Common fluorophores
@@ -57,9 +85,12 @@ def extract_wavelength(channel_str: str) -> int:
             return wl
     
     # Fallback
-    if m := re.search(r'\d+', channel_str):
-        return int(m.group(0))
-    return 0
+    numbers = re.findall(r'\d{3,4}', channel_str)
+    if numbers:
+        # Prefer the last 3-4 digit group (likely wavelength)
+        val = int(numbers[-1])
+        return val if val > 0 else None
+    return None
 
 
 def detect_format(base_path: Path) -> str:
@@ -78,6 +109,8 @@ def detect_format(base_path: Path) -> str:
 
 def wavelength_to_colormap(wavelength: int, index: int = 0) -> str:
     """Map wavelength to NDV colormap."""
+    if wavelength is None or wavelength == 0:
+        return 'gray'
     if wavelength <= 420:
         return 'blue'
     elif 470 <= wavelength <= 510:
@@ -88,7 +121,9 @@ def wavelength_to_colormap(wavelength: int, index: int = 0) -> str:
         return 'red'
     elif wavelength >= 700:
         return 'darkred'
-    return ['blue', 'green', 'yellow', 'red', 'darkred'][index % 5]
+    return 'gray'
+
+
 
 
 class LauncherWindow(QMainWindow):
@@ -97,7 +132,7 @@ class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("NDViewer Lightweight - Open Dataset")
-        self.setGeometry(100, 100, 500, 300)
+        self.setGeometry(100, 100, 400, 300)  # 4:3 aspect, narrower
         self._set_dark_theme()
         
         central = QWidget()
@@ -156,9 +191,14 @@ class LauncherWindow(QMainWindow):
         self.status_label.setText(f"Opening: {Path(path).name}...")
         QApplication.processEvents()
         
+        # Keep launcher open; allow multiple drops without restarting.
+        if self.viewer_window:
+            try:
+                self.viewer_window.close()
+            except Exception:
+                pass
         self.viewer_window = LightweightMainWindow(path)
         self.viewer_window.show()
-        self.close()
     
     def _set_dark_theme(self):
         from PyQt5.QtWidgets import QStyleFactory
@@ -184,6 +224,8 @@ class LightweightViewer(QWidget):
         super().__init__()
         self.dataset_path = dataset_path
         self.ndv_viewer = None
+        self._xarray_data = None  # Store for external access
+        self._open_handles = []   # Keep tif handles alive when mmap is used
         self._setup_ui()
         self.load_dataset(dataset_path)
     
@@ -218,6 +260,8 @@ class LightweightViewer(QWidget):
         try:
             data = self._create_lazy_array(Path(path))
             if data is not None:
+                self._xarray_data = data  # Store for profiling
+                self._open_handles = data.attrs.get('_open_tifs', [])
                 self._set_ndv_data(data)
                 
                 # Update status with dimensions
@@ -232,7 +276,7 @@ class LightweightViewer(QWidget):
     
     def _create_lazy_array(self, base_path: Path) -> Optional[xr.DataArray]:
         """Create lazy xarray from dataset - auto-detects format."""
-        if not DASK_AVAILABLE:
+        if not LAZY_LOADING_AVAILABLE:
             return None
         
         fmt = detect_format(base_path)
@@ -242,7 +286,7 @@ class LightweightViewer(QWidget):
             print("No FOVs found")
             return None
         
-        print(f"Format: {fmt}, FOVs: {len(fovs)}")
+        # print(f"Format: {fmt}, FOVs: {len(fovs)}")  # Disabled for profiling
         
         if fmt == 'ome_tiff':
             return self._load_ome_tiff(base_path, fovs)
@@ -272,9 +316,8 @@ class LightweightViewer(QWidget):
         return [{'region': r, 'fov': f} for r, f in sorted(fov_set)]
     
     def _load_ome_tiff(self, base_path: Path, fovs: List[Dict]) -> Optional[xr.DataArray]:
-        """Load OME-TIFF with FOV-level chunking for minimal graph overhead."""
+        """Fast OME-TIFF: mmap via tifffile.aszarr, small chunks, no big graphs."""
         try:
-            # Build file index
             ome_dir = base_path / "ome_tiff"
             if not ome_dir.exists():
                 ome_dir = next((d for d in base_path.iterdir() 
@@ -284,25 +327,20 @@ class LightweightViewer(QWidget):
             for f in ome_dir.glob("*.ome.tif*"):
                 if m := FPATTERN_OME.search(f.name):
                     file_index[(m.group("r"), int(m.group("f")))] = str(f)
-            
             if not file_index:
                 return None
             
-            # Extract metadata from first file (ONE file open)
             first_file = next(iter(file_index.values()))
             with tf.TiffFile(first_file) as tif:
                 series = tif.series[0]
                 axes = series.axes
                 shape = series.shape
                 shape_dict = dict(zip(axes, shape))
-                
                 n_t = shape_dict.get('T', 1)
                 n_c = shape_dict.get('C', 1)
                 n_z = shape_dict.get('Z', 1)
                 height = shape_dict.get('Y', shape[-2])
                 width = shape_dict.get('X', shape[-1])
-                
-                # Extract channel names from OME-XML
                 channel_names = []
                 try:
                     if tif.ome_metadata:
@@ -316,68 +354,63 @@ class LightweightViewer(QWidget):
                 except:
                     pass
             
-            # Build LUTs
-            luts = {}
-            for i in range(n_c):
-                name = channel_names[i] if i < len(channel_names) else f'Ch{i}'
-                luts[i] = wavelength_to_colormap(extract_wavelength(name), i)
+            axis_map = {'T': 'time', 'Z': 'z_level', 'C': 'channel', 'Y': 'y', 'X': 'x'}
+            dims_base = [axis_map.get(ax, f"ax_{ax}") for ax in axes]
+            coords_base = {axis_map.get(ax, f"ax_{ax}"): list(range(dim)) for ax, dim in zip(axes, shape)}
+
+            # Per-axis chunking: 1 for non-spatial, full for spatial
+            chunks = []
+            for ax, dim in zip(axes, shape):
+                if ax in ('X', 'Y'):
+                    chunks.append(dim)
+                else:
+                    chunks.append(1)
             
+            luts = {i: wavelength_to_colormap(extract_wavelength(
+                    channel_names[i] if i < len(channel_names) else f'Ch{i}'), i) 
+                    for i in range(n_c)}
             n_fov = len(fovs)
-            
-            # Memory protection for huge datasets
-            if n_t * n_fov > 10000:
-                print(f"WARNING: {n_t * n_fov} chunks - limiting to T=1")
-                n_t = 1
-            
-            # FOV-level chunking: load entire (Z, C, Y, X) volume per chunk
-            def load_fov_volume(fov_idx, t_idx):
-                def _load():
-                    try:
-                        region, fov = fovs[fov_idx]['region'], fovs[fov_idx]['fov']
-                        filepath = file_index.get((region, fov))
-                        if not filepath:
-                            return np.zeros((n_z, n_c, height, width), dtype=np.uint16)
-                        
-                        with tf.TiffFile(filepath) as tif:
-                            series = tif.series[0]
-                            volume = np.zeros((n_z, n_c, height, width), dtype=np.uint16)
-                            for z in range(n_z):
-                                for c in range(n_c):
-                                    page_idx = t_idx * (n_z * n_c) + z * n_c + c
-                                    volume[z, c] = series.pages[page_idx].asarray()
-                        return volume
-                    except Exception as e:
-                        print(f"Error loading FOV {fov_idx}, T={t_idx}: {e}")
-                        return np.zeros((n_z, n_c, height, width), dtype=np.uint16)
-                return _load
-            
-            # Build minimal dask graph (T × FOV chunks only)
-            time_arrays = []
-            for t in range(n_t):
-                fov_arrays = [
-                    da.from_delayed(
-                        delayed(load_fov_volume(f, t))(),
-                        shape=(n_z, n_c, height, width),
-                        dtype=np.uint16
-                    ) for f in range(n_fov)
-                ]
-                time_arrays.append(da.stack(fov_arrays, axis=0))
-            
-            full_array = da.stack(time_arrays, axis=0)  # (T, FOV, Z, C, Y, X)
-            
-            xarr = xr.DataArray(
-                full_array,
-                dims=['time', 'fov', 'z_level', 'channel', 'y', 'x'],
-                coords={
-                    'time': list(range(n_t)),
-                    'fov': list(range(n_fov)),
-                    'z_level': list(range(n_z)),
-                    'channel': list(range(n_c))
-                }
-            )
+
+            def open_zarr(path: str):
+                tif = tf.TiffFile(path)
+                zarr_store = tif.series[0].aszarr()
+                return tif, zarr_store
+
+            # One dask array per FOV, chunked per plane for fast single-slice reads
+            fov_arrays = []
+            tifs_kept = []
+            for fov_idx in range(n_fov):
+                region, fov = fovs[fov_idx]['region'], fovs[fov_idx]['fov']
+                filepath = file_index.get((region, fov))
+                if not filepath:
+                    fov_arrays.append(da.zeros((n_t, n_z, n_c, height, width), dtype=np.uint16))
+                    continue
+                tif, zarr_store = open_zarr(filepath)
+                tifs_kept.append(tif)
+                arr = da.from_zarr(zarr_store, chunks=tuple(chunks))
+                # keep tif open to support mmap; rely on Python GC after viewer closes
+                fov_arrays.append(arr)
+
+            # Insert fov axis immediately after time if present, else at front
+            if 'time' in dims_base:
+                fov_axis = dims_base.index('time') + 1
+            else:
+                fov_axis = 0
+            full_array = da.stack(fov_arrays, axis=fov_axis)
+
+            dims_full = dims_base[:fov_axis] + ['fov'] + dims_base[fov_axis:]
+            coords_full = coords_base.copy()
+            coords_full['fov'] = list(range(n_fov))
+
+            xarr = xr.DataArray(full_array, dims=dims_full, coords=coords_full)
+            # Ensure standard dims exist with singleton axes if missing
+            for ax in ['time', 'fov', 'z_level', 'channel', 'y', 'x']:
+                if ax not in xarr.dims:
+                    xarr = xarr.expand_dims({ax: [0]})
+            xarr = xarr.transpose('time', 'fov', 'z_level', 'channel', 'y', 'x')
             xarr.attrs['luts'] = luts
+            xarr.attrs['_open_tifs'] = tifs_kept
             return xarr
-            
         except Exception as e:
             print(f"OME-TIFF load error: {e}")
             import traceback
@@ -385,9 +418,8 @@ class LightweightViewer(QWidget):
             return None
     
     def _load_single_tiff(self, base_path: Path, fovs: List[Dict]) -> Optional[xr.DataArray]:
-        """Load single-TIFF with FOV-level chunking."""
+        """Fast single-TIFF: per-plane on-demand loads with tiny LRU cache."""
         try:
-            # Single scan to build complete file index
             file_index = {}  # (t, region, fov, z, channel) -> filepath
             t_set, z_set, c_set = set(), set(), set()
             
@@ -396,65 +428,73 @@ class LightweightViewer(QWidget):
                     continue
                 t = int(tp_dir.name)
                 t_set.add(t)
-                
-                for f in tp_dir.glob("*.tiff"):
+                for f in tp_dir.iterdir():
+                    if f.suffix.lower() not in [".tiff", ".tif"]:
+                        continue
                     if m := FPATTERN.search(f.name):
                         region, fov = m.group("r"), int(m.group("f"))
                         z, channel = int(m.group("z")), m.group("c")
-                        z_set.add(z)
-                        c_set.add(channel)
+                        z_set.add(z); c_set.add(channel)
                         file_index[(t, region, fov, z, channel)] = str(f)
+            
+            if not file_index:
+                return None
             
             times = sorted(t_set)
             z_levels = sorted(z_set)
             channels = sorted(c_set)
-            
             n_t, n_fov, n_z, n_c = len(times), len(fovs), len(z_levels), len(channels)
             
-            # Get dimensions from sample file
-            sample = next(iter(file_index.values()))
-            with tf.TiffFile(sample) as tif:
-                height, width = tif.pages[0].shape[-2:]
+            sample = next((p for p in file_index.values() if p.lower().endswith((".tif", ".tiff"))), None)
+            if sample is None:
+                return None
+            try:
+                with tf.TiffFile(sample) as tif:
+                    height, width = tif.pages[0].shape[-2:]
+            except Exception:
+                return None
             
-            # Build LUTs
             luts = {i: wavelength_to_colormap(extract_wavelength(c), i) 
                     for i, c in enumerate(channels)}
-            
-            # FOV-level chunking
-            def load_fov_volume(fov_idx, t_idx):
-                def _load():
-                    try:
-                        t = times[t_idx]
-                        region, fov = fovs[fov_idx]['region'], fovs[fov_idx]['fov']
-                        volume = np.zeros((n_z, n_c, height, width), dtype=np.uint16)
-                        
-                        for zi, z in enumerate(z_levels):
-                            for ci, c in enumerate(channels):
-                                filepath = file_index.get((t, region, fov, z, c))
-                                if filepath:
-                                    with tf.TiffFile(filepath) as tif:
-                                        volume[zi, ci] = tif.pages[0].asarray()
-                        return volume
-                    except:
-                        return np.zeros((n_z, n_c, height, width), dtype=np.uint16)
-                return _load
-            
-            # Build dask graph
-            time_arrays = []
-            for t_idx in range(n_t):
-                fov_arrays = [
-                    da.from_delayed(
-                        delayed(load_fov_volume(f, t_idx))(),
-                        shape=(n_z, n_c, height, width),
-                        dtype=np.uint16
-                    ) for f in range(n_fov)
-                ]
-                time_arrays.append(da.stack(fov_arrays, axis=0))
-            
-            full_array = da.stack(time_arrays, axis=0)
-            
+
+            @lru_cache(maxsize=128)
+            def load_plane(t, region, fov, z, channel):
+                filepath = file_index.get((t, region, fov, z, channel))
+                if not filepath:
+                    return np.zeros((height, width), dtype=np.uint16)
+                try:
+                    ext = Path(filepath).suffix.lower()
+                    if ext in [".tif", ".tiff"]:
+                        with tf.TiffFile(filepath) as tif:
+                            return tif.pages[0].asarray()
+                except Exception:
+                    pass
+                return np.zeros((height, width), dtype=np.uint16)
+
+            # Build on-demand loader via map_blocks over a dummy array
+            chunks = (
+                (1,) * n_t,
+                (1,) * n_fov,
+                (1,) * n_z,
+                (1,) * n_c,
+                (height,),
+                (width,),
+            )
+
+            def _block_loader(block, block_info=None):
+                loc = block_info[None]["chunk-location"]
+                t_idx, f_idx, z_idx, c_idx = loc[0], loc[1], loc[2], loc[3]
+                t = times[t_idx]
+                region, fov = fovs[f_idx]['region'], fovs[f_idx]['fov']
+                z = z_levels[z_idx]; channel = channels[c_idx]
+                plane = load_plane(t, region, fov, z, channel)
+                return plane.reshape(1, 1, 1, 1, height, width)
+
+            dummy = da.zeros((n_t, n_fov, n_z, n_c, height, width), chunks=chunks, dtype=np.uint16)
+            stacked = da.map_blocks(_block_loader, dummy, dtype=np.uint16, chunks=chunks)
+
             xarr = xr.DataArray(
-                full_array,
+                stacked,
                 dims=['time', 'fov', 'z_level', 'channel', 'y', 'x'],
                 coords={
                     'time': times,
@@ -465,7 +505,6 @@ class LightweightViewer(QWidget):
             )
             xarr.attrs['luts'] = luts
             return xarr
-            
         except Exception as e:
             print(f"Single-TIFF load error: {e}")
             import traceback
@@ -505,7 +544,7 @@ class LightweightMainWindow(QMainWindow):
     def __init__(self, dataset_path: str):
         super().__init__()
         self.setWindowTitle(f"NDViewer Lightweight - {Path(dataset_path).name}")
-        self.setGeometry(100, 100, 800, 700)
+        self.setGeometry(100, 100, 720, 540)  # 4:3 aspect, smaller
         self._set_dark_theme()
         
         self.viewer = LightweightViewer(dataset_path)
