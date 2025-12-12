@@ -1,0 +1,14 @@
+name: ndviewer_light
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - tifffile
+  - dask
+  - xarray
+  - superqt
+  - pyqt
+  - vispy
+  - zarr
+  - ndv
