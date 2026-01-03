@@ -626,10 +626,16 @@ class LightweightViewer(QWidget):
 
             axis_map = {"T": "time", "Z": "z_level", "C": "channel", "Y": "y", "X": "x"}
             dims_base = [axis_map.get(ax, f"ax_{ax}") for ax in axes]
-            coords_base = {
-                axis_map.get(ax, f"ax_{ax}"): list(range(dim))
-                for ax, dim in zip(axes, shape)
-            }
+            # Build channel name list - use extracted names or generate fallback
+            if not channel_names or len(channel_names) != n_c:
+                channel_names = [f"Ch{i}" for i in range(n_c)]
+            coords_base = {}
+            for ax, dim in zip(axes, shape):
+                key = axis_map.get(ax, f"ax_{ax}")
+                if key == "channel":
+                    coords_base[key] = channel_names
+                else:
+                    coords_base[key] = list(range(dim))
 
             # Per-axis chunking: 1 for non-spatial, full for spatial
             chunks = []
@@ -640,12 +646,8 @@ class LightweightViewer(QWidget):
                     chunks.append(1)
 
             luts = {
-                i: wavelength_to_colormap(
-                    extract_wavelength(
-                        channel_names[i] if i < len(channel_names) else f"Ch{i}"
-                    )
-                )
-                for i in range(n_c)
+                i: wavelength_to_colormap(extract_wavelength(name))
+                for i, name in enumerate(channel_names)
             }
             n_fov = len(fovs)
 
@@ -689,6 +691,7 @@ class LightweightViewer(QWidget):
                     xarr = xarr.expand_dims({ax: [0]})
             xarr = xarr.transpose("time", "fov", "z_level", "channel", "y", "x")
             xarr.attrs["luts"] = luts
+            xarr.attrs["channel_names"] = channel_names
             xarr.attrs["_open_tifs"] = tifs_kept
             return xarr
         except Exception as e:
@@ -808,6 +811,7 @@ class LightweightViewer(QWidget):
                 },
             )
             xarr.attrs["luts"] = luts
+            xarr.attrs["channel_names"] = channels
             return xarr
         except Exception as e:
             print(f"Single-TIFF load error: {e}")
@@ -841,6 +845,30 @@ class LightweightViewer(QWidget):
         layout.removeWidget(old_widget)
         old_widget.deleteLater()
         layout.insertWidget(idx, self.ndv_viewer.widget(), 1)
+
+        # Update channel labels after viewer is ready
+        QTimer.singleShot(500, self._update_channel_labels)
+
+    def _update_channel_labels(self):
+        """Manually update channel labels in the NDV viewer."""
+        if not self.ndv_viewer or self._xarray_data is None:
+            return
+
+        channel_names = self._xarray_data.attrs.get("channel_names", [])
+        if not channel_names:
+            return
+
+        try:
+            controllers = getattr(self.ndv_viewer, "_lut_controllers", None)
+            if not controllers:
+                return
+
+            for i, name in enumerate(channel_names):
+                if i in controllers:
+                    controllers[i].key = name
+                    controllers[i].synchronize()
+        except Exception as e:
+            logger.debug("Failed to update channel labels: %s", e)
 
 
 class LightweightMainWindow(QMainWindow):
