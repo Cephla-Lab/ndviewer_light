@@ -832,7 +832,27 @@ class LightweightViewer(QWidget):
         max_3d_texture_size = 2048  # Conservative estimate
         y_size = data.sizes.get("y", 0)
         x_size = data.sizes.get("x", 0)
-        allow_3d = y_size <= max_3d_texture_size and x_size <= max_3d_texture_size
+
+        # Downsample if needed for 3D compatibility (using dask for lazy evaluation)
+        if y_size > max_3d_texture_size or x_size > max_3d_texture_size:
+            downsample_factor = max(
+                (y_size + max_3d_texture_size - 1) // max_3d_texture_size,
+                (x_size + max_3d_texture_size - 1) // max_3d_texture_size,
+            )
+            # Use power of 2 for efficiency
+            downsample_factor = 2 ** int(np.ceil(np.log2(downsample_factor)))
+            new_y = y_size // downsample_factor
+            new_x = x_size // downsample_factor
+            logger.info(
+                f"Downsampling by {downsample_factor}x for 3D compatibility "
+                f"({y_size}x{x_size} -> {new_y}x{new_x})"
+            )
+            # Use coarsen with dask - this stays lazy
+            data = data.coarsen(
+                y=downsample_factor, x=downsample_factor, boundary="trim"
+            ).mean()
+            # Preserve attributes after coarsen
+            data.attrs["luts"] = luts
 
         # Recreate viewer with proper dimensions
         old_widget = self.ndv_viewer.widget()
@@ -844,7 +864,6 @@ class LightweightViewer(QWidget):
             channel_mode="composite",
             luts=luts,
             visible_axes=(-2, -1),  # 2D display (y, x), sliders for rest
-            viewer_options={"show_3d_button": allow_3d},
         )
 
         # Replace widget
