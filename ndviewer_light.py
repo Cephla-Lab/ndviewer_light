@@ -337,10 +337,11 @@ class LightweightViewer(QWidget):
         if fmt == "single_tiff":
             tp_dirs = [d for d in base.iterdir() if d.is_dir() and d.name.isdigit()]
             if not tp_dirs:
-                return (fmt, -1, 0)
+                return (fmt, -1, 0, 0)
 
             t_vals = sorted(int(d.name) for d in tp_dirs)
             first_tp = base / str(t_vals[0])
+            latest_tp = base / str(t_vals[-1])
 
             # FOVs are assumed to only appear in the first timepoint during acquisition.
             fov_set = set()
@@ -355,7 +356,20 @@ class LightweightViewer(QWidget):
             except Exception as e:
                 logger.debug("Error scanning FOVs: %s", e)
 
-            return (fmt, max(t_vals), len(fov_set))
+            # Count files in latest timepoint to detect when files are actually written
+            # (not just when the folder is created)
+            latest_file_count = 0
+            try:
+                if latest_tp.exists():
+                    latest_file_count = sum(
+                        1
+                        for f in latest_tp.iterdir()
+                        if f.suffix.lower() in TIFF_EXTENSIONS
+                    )
+            except Exception as e:
+                logger.debug("Error counting files in latest timepoint: %s", e)
+
+            return (fmt, max(t_vals), len(fov_set), latest_file_count)
 
         # ome_tiff
         ome_dir = base / "ome_tiff"
@@ -696,7 +710,9 @@ class LightweightViewer(QWidget):
                 if not (tp_dir.is_dir() and tp_dir.name.isdigit()):
                     continue
                 t = int(tp_dir.name)
-                t_set.add(t)
+                # Only add timepoint to t_set if it has at least one valid file
+                # This prevents showing black images for empty/incomplete timepoints
+                has_files = False
                 for f in tp_dir.iterdir():
                     if f.suffix.lower() not in TIFF_EXTENSIONS:
                         continue
@@ -706,6 +722,9 @@ class LightweightViewer(QWidget):
                         z_set.add(z)
                         c_set.add(channel)
                         file_index[(t, region, fov, z, channel)] = str(f)
+                        has_files = True
+                if has_files:
+                    t_set.add(t)
 
             if not file_index:
                 return None
