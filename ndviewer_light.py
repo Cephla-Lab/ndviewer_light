@@ -1,22 +1,33 @@
 """
 Lightweight NDV-based viewer
 
-Supports: OME-TIFF and single-TIFF acquisitions with lazy loading via dask (specify how it is faster).
+Supports: OME-TIFF and single-TIFF acquisitions with lazy loading via dask.
+Lazy loading enables fast initial display by only reading image planes on-demand.
 """
 
+import logging
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 
 import numpy as np
 
 
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QMainWindow, 
-                             QPushButton, QFileDialog, QApplication)
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QMainWindow,
+                             QFileDialog, QApplication, QStyleFactory)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPalette, QColor
+
+if TYPE_CHECKING:
+    import xarray as xr
+
+# Constants
+TIFF_EXTENSIONS = {".tif", ".tiff"}
+LIVE_REFRESH_INTERVAL_MS = 750
+
+logger = logging.getLogger(__name__)
 
 # NDV viewer
 try:
@@ -35,12 +46,12 @@ try:
                 if hasattr(self, "_label"):
                     try:
                         self._label.setRange(a, b)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Failed to set label range: %s", e)
             QLabeledSlider.setRange = _patched_setRange
             QLabeledSlider._ndv_range_patch = True
-    except Exception:
-        pass
+    except ImportError:
+        pass  # superqt not available
 except ImportError:
     NDV_AVAILABLE = False
 
@@ -107,7 +118,7 @@ def detect_format(base_path: Path) -> str:
     return 'single_tiff'
 
 
-def wavelength_to_colormap(wavelength: int, index: int = 0) -> str:
+def wavelength_to_colormap(wavelength: Optional[int]) -> str:
     """Map wavelength to NDV colormap."""
     if wavelength is None or wavelength == 0:
         return 'gray'
@@ -124,6 +135,21 @@ def wavelength_to_colormap(wavelength: int, index: int = 0) -> str:
     return 'gray'
 
 
+def _apply_dark_theme(widget: QWidget) -> None:
+    """Apply dark Fusion theme to a widget."""
+    widget.setStyle(QStyleFactory.create("Fusion"))
+
+    p = widget.palette()
+    p.setColor(QPalette.Window, QColor(53, 53, 53))
+    p.setColor(QPalette.WindowText, QColor(255, 255, 255))
+    p.setColor(QPalette.Base, QColor(35, 35, 35))
+    p.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+    p.setColor(QPalette.Text, QColor(255, 255, 255))
+    p.setColor(QPalette.Button, QColor(53, 53, 53))
+    p.setColor(QPalette.ButtonText, QColor(255, 255, 255))
+    p.setColor(QPalette.Highlight, QColor(42, 130, 218))
+    p.setColor(QPalette.HighlightedText, QColor(35, 35, 35))
+    widget.setPalette(p)
 
 
 class LauncherWindow(QMainWindow):
@@ -190,36 +216,30 @@ class LauncherWindow(QMainWindow):
         """Launch main viewer window with dataset."""
         self.status_label.setText(f"Opening: {Path(path).name}...")
         QApplication.processEvents()
-        
+
         # Keep launcher open; allow multiple drops without restarting.
         if self.viewer_window:
             try:
                 self.viewer_window.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to close previous viewer: %s", e)
         self.viewer_window = LightweightMainWindow(path)
         self.viewer_window.show()
-    
+
     def _set_dark_theme(self):
-        from PyQt5.QtWidgets import QStyleFactory
-        self.setStyle(QStyleFactory.create("Fusion"))
-        
-        p = self.palette()
-        p.setColor(QPalette.Window, QColor(53, 53, 53))
-        p.setColor(QPalette.WindowText, QColor(255, 255, 255))
-        p.setColor(QPalette.Base, QColor(35, 35, 35))
-        p.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-        p.setColor(QPalette.Text, QColor(255, 255, 255))
-        p.setColor(QPalette.Button, QColor(53, 53, 53))
-        p.setColor(QPalette.ButtonText, QColor(255, 255, 255))
-        p.setColor(QPalette.Highlight, QColor(42, 130, 218))
-        p.setColor(QPalette.HighlightedText, QColor(35, 35, 35))
-        self.setPalette(p)
+        _apply_dark_theme(self)
 
 
 class LightweightViewer(QWidget):
     """Minimal NDV-based viewer."""
-    
+
+    dataset_path: str
+    ndv_viewer: Optional["ndv.ArrayViewer"]
+    _xarray_data: Optional["xr.DataArray"]
+    _open_handles: List
+    _last_sig: Optional[tuple]
+    _refresh_timer: Optional[QTimer]
+
     def __init__(self, dataset_path: str):
         super().__init__()
         self.dataset_path = dataset_path
@@ -260,7 +280,7 @@ class LightweightViewer(QWidget):
         if not (LAZY_LOADING_AVAILABLE and NDV_AVAILABLE and self.ndv_viewer):
             return
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(750)  # ms; keep light to avoid IO churn
+        self._refresh_timer.setInterval(LIVE_REFRESH_INTERVAL_MS)
         self._refresh_timer.timeout.connect(self._maybe_refresh)
         self._refresh_timer.start()
 
@@ -269,9 +289,16 @@ class LightweightViewer(QWidget):
         for h in getattr(self, "_open_handles", []) or []:
             try:
                 h.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to close TiffFile handle: %s", e)
         self._open_handles = []
+
+    def closeEvent(self, event):
+        """Clean up resources when the widget is closed."""
+        if self._refresh_timer:
+            self._refresh_timer.stop()
+        self._close_open_handles()
+        super().closeEvent(event)
 
     def _force_refresh(self):
         self._last_sig = None
@@ -295,13 +322,13 @@ class LightweightViewer(QWidget):
             try:
                 if first_tp.exists():
                     for f in first_tp.iterdir():
-                        if f.suffix.lower() not in [".tif", ".tiff"]:
+                        if f.suffix.lower() not in TIFF_EXTENSIONS:
                             continue
                         m = FPATTERN.search(f.name)
                         if m:
                             fov_set.add((m.group("r"), int(m.group("f"))))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Error scanning FOVs: %s", e)
 
             return (fmt, max(t_vals), len(fov_set))
 
@@ -317,7 +344,8 @@ class LightweightViewer(QWidget):
         if ome_files:
             try:
                 st = ome_files[0].stat()
-            except Exception:
+            except Exception as e:
+                logger.debug("Failed to stat OME file: %s", e)
                 st = None
             try:
                 with tf.TiffFile(str(ome_files[0])) as tif:
@@ -328,9 +356,9 @@ class LightweightViewer(QWidget):
                         t_len = int(shape[axes.index("T")])
                     else:
                         t_len = 1
-            except Exception:
+            except Exception as e:
                 # File may be mid-write; fall back on size/mtime if available
-                pass
+                logger.debug("Failed to read OME series (may be mid-write): %s", e)
 
         if st is None:
             return (fmt, n_ome, t_len)
@@ -396,7 +424,8 @@ class LightweightViewer(QWidget):
 
         try:
             sig = self._dataset_signature()
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to compute dataset signature: %s", e)
             return
         if sig == self._last_sig:
             return
@@ -417,8 +446,8 @@ class LightweightViewer(QWidget):
             for h in old_handles or []:
                 try:
                     h.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to close old handle: %s", e)
             return
 
         # Fallback: rebuild widget (may be visible on some platforms). Reduce flicker a bit.
@@ -431,8 +460,8 @@ class LightweightViewer(QWidget):
             for h in old_handles or []:
                 try:
                     h.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to close old handle: %s", e)
     
     def load_dataset(self, path: str):
         """Load dataset and display in NDV."""
@@ -533,8 +562,8 @@ class LightweightViewer(QWidget):
                             name = ch.get('Name') or ch.get('ID', '')
                             if name:
                                 channel_names.append(name)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to parse OME metadata: %s", e)
             
             axis_map = {'T': 'time', 'Z': 'z_level', 'C': 'channel', 'Y': 'y', 'X': 'x'}
             dims_base = [axis_map.get(ax, f"ax_{ax}") for ax in axes]
@@ -549,7 +578,7 @@ class LightweightViewer(QWidget):
                     chunks.append(1)
             
             luts = {i: wavelength_to_colormap(extract_wavelength(
-                    channel_names[i] if i < len(channel_names) else f'Ch{i}'), i) 
+                    channel_names[i] if i < len(channel_names) else f'Ch{i}'))
                     for i in range(n_c)}
             n_fov = len(fovs)
 
@@ -611,32 +640,34 @@ class LightweightViewer(QWidget):
                 t = int(tp_dir.name)
                 t_set.add(t)
                 for f in tp_dir.iterdir():
-                    if f.suffix.lower() not in [".tiff", ".tif"]:
+                    if f.suffix.lower() not in TIFF_EXTENSIONS:
                         continue
                     if m := FPATTERN.search(f.name):
                         region, fov = m.group("r"), int(m.group("f"))
                         z, channel = int(m.group("z")), m.group("c")
                         z_set.add(z); c_set.add(channel)
                         file_index[(t, region, fov, z, channel)] = str(f)
-            
+
             if not file_index:
                 return None
-            
+
             times = sorted(t_set)
             z_levels = sorted(z_set)
             channels = sorted(c_set)
             n_t, n_fov, n_z, n_c = len(times), len(fovs), len(z_levels), len(channels)
-            
-            sample = next((p for p in file_index.values() if p.lower().endswith((".tif", ".tiff"))), None)
+
+            sample = next((p for p in file_index.values()
+                          if Path(p).suffix.lower() in TIFF_EXTENSIONS), None)
             if sample is None:
                 return None
             try:
                 with tf.TiffFile(sample) as tif:
                     height, width = tif.pages[0].shape[-2:]
-            except Exception:
+            except Exception as e:
+                logger.debug("Failed to read sample TIFF: %s", e)
                 return None
-            
-            luts = {i: wavelength_to_colormap(extract_wavelength(c), i) 
+
+            luts = {i: wavelength_to_colormap(extract_wavelength(c))
                     for i, c in enumerate(channels)}
 
             @lru_cache(maxsize=128)
@@ -646,11 +677,11 @@ class LightweightViewer(QWidget):
                     return np.zeros((height, width), dtype=np.uint16)
                 try:
                     ext = Path(filepath).suffix.lower()
-                    if ext in [".tif", ".tiff"]:
+                    if ext in TIFF_EXTENSIONS:
                         with tf.TiffFile(filepath) as tif:
                             return tif.pages[0].asarray()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to load plane %s: %s", filepath, e)
                 return np.zeros((height, width), dtype=np.uint16)
 
             # Build on-demand loader via map_blocks over a dummy array
@@ -722,31 +753,25 @@ class LightweightViewer(QWidget):
 
 class LightweightMainWindow(QMainWindow):
     """Main window with dark theme."""
-    
+
+    viewer: LightweightViewer
+
     def __init__(self, dataset_path: str):
         super().__init__()
         self.setWindowTitle(f"NDViewer Lightweight - {Path(dataset_path).name}")
         self.setGeometry(100, 100, 720, 540)  # 4:3 aspect, smaller
         self._set_dark_theme()
-        
+
         self.viewer = LightweightViewer(dataset_path)
         self.setCentralWidget(self.viewer)
-    
+
     def _set_dark_theme(self):
-        from PyQt5.QtWidgets import QStyleFactory
-        self.setStyle(QStyleFactory.create("Fusion"))
-        
-        p = self.palette()
-        p.setColor(QPalette.Window, QColor(53, 53, 53))
-        p.setColor(QPalette.WindowText, QColor(255, 255, 255))
-        p.setColor(QPalette.Base, QColor(35, 35, 35))
-        p.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-        p.setColor(QPalette.Text, QColor(255, 255, 255))
-        p.setColor(QPalette.Button, QColor(53, 53, 53))
-        p.setColor(QPalette.ButtonText, QColor(255, 255, 255))
-        p.setColor(QPalette.Highlight, QColor(42, 130, 218))
-        p.setColor(QPalette.HighlightedText, QColor(35, 35, 35))
-        self.setPalette(p)
+        _apply_dark_theme(self)
+
+    def closeEvent(self, event):
+        """Ensure viewer cleanup when window closes."""
+        self.viewer.close()
+        super().closeEvent(event)
 
 
 def main(dataset_path: str = None):
