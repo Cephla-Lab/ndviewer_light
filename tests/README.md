@@ -42,7 +42,7 @@ Comprehensive unit tests for the channel name display feature. Tests cover three
 
 #### 1. OME-TIFF Channel Name Logic (`TestOMETiffChannelNamesLogic`)
 
-Tests the channel name extraction and preservation logic from OME-TIFF metadata (lines 614-637 in ndviewer_light.py):
+Tests the channel name extraction and preservation logic from OME-TIFF metadata (in `_load_ome_tiff` method):
 
 - **Empty channel names fallback**: When no channel names are found in metadata, defaults to `Ch0`, `Ch1`, `Ch2`, etc.
 - **Extension with fallbacks**: When fewer channel names than channels (e.g., 2 names for 5 channels), extends with `Ch2`, `Ch3`, `Ch4`
@@ -53,28 +53,28 @@ Tests the channel name extraction and preservation logic from OME-TIFF metadata 
 
 #### 2. Single-TIFF Channel Name Logic (`TestSingleTiffChannelNamesLogic`)
 
-Tests channel name extraction from single-TIFF filenames (line 743 in ndviewer_light.py):
+Tests channel name extraction from single-TIFF filenames (in `_load_single_tiff` method):
 
 - **Alphabetical sorting**: Channel names extracted from filenames are sorted alphabetically
 - **Set to list conversion**: Tests the conversion from set (during discovery) to sorted list
-- **Storage in attrs**: Verifies channel names are properly stored in xarray attrs (line 822)
+- **Storage in attrs**: Verifies channel names are properly stored in xarray attrs
 
 #### 3. Retry Mechanism (`TestChannelLabelRetryMechanism`)
 
-Tests the retry mechanism for updating channel labels in the NDV viewer (lines 860-888 in ndviewer_light.py):
+Tests the retry mechanism for updating channel labels in the NDV viewer (in `_set_ndv_data` and `_schedule_channel_label_update` methods):
 
-- **Generation counter**: Tests that generation counter increments with each update (line 860)
-- **Pending retries initialization**: Tests that retry counter is reset to 20 on each update (line 861)
-- **Stale callback detection**: Tests that callbacks with old generation numbers are detected and ignored (line 867)
+- **Generation counter**: Tests that generation counter increments with each update
+- **Pending retries initialization**: Tests that retry counter is reset to 20 on each update
+- **Stale callback detection**: Tests that callbacks with old generation numbers are detected and ignored
 - **Current generation processing**: Tests that callbacks with current generation proceed normally
-- **Retry decrement**: Tests that retry counter decrements on each attempt (line 887)
-- **Timeout detection**: Tests that retries stop when counter reaches 0 (line 874)
+- **Retry decrement**: Tests that retry counter decrements on each attempt
+- **Timeout detection**: Tests that retries stop when counter reaches 0
 
 The generation counter mechanism is critical for preventing stale callbacks from previous data loads from interfering with new loads. When a new dataset is loaded, the generation increments, causing all pending callbacks from the previous load to exit early.
 
 #### 4. Channel Label Update Logic (`TestChannelLabelUpdate`)
 
-Tests the logic that applies channel names to NDV LUT controllers (lines 909-923 in ndviewer_light.py):
+Tests the logic that applies channel names to NDV LUT controllers (in `_update_channel_labels` method):
 
 - **Setting controller keys**: Tests that channel names are correctly assigned to controller.key
 - **Fewer controllers than names**: Tests graceful handling when there are more channel names than controllers
@@ -99,7 +99,7 @@ These tests follow a **logic-focused** approach rather than integration testing:
 4. **Clear documentation**: Each test has a descriptive name and docstring explaining what it verifies
 
 This approach ensures:
-- Fast test execution (< 0.2 seconds for all 25 tests)
+- Fast test execution (typically under 1 second for the full suite)
 - No dependency on GUI components
 - Clear verification of business logic
 - Easy debugging when tests fail
@@ -115,4 +115,4 @@ Tests are organized into classes by functional area:
 
 ## Code References
 
-Each test includes comments referencing the specific line numbers in `ndviewer_light.py` that implement the tested logic, making it easy to trace tests back to the implementation.
+Each test includes comments referencing the relevant methods in `ndviewer_light.py` that implement the tested logic, making it easy to trace tests back to the implementation using IDE navigation (e.g., "Go to Definition").

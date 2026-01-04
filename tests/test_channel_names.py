@@ -38,7 +38,7 @@ class TestOMETiffChannelNamesLogic:
         n_c = 3
         channel_names = []
 
-        # Simulate the logic from _load_ome_tiff (lines 632-637)
+        # Simulate the channel name adjustment logic from _load_ome_tiff
         if not channel_names:
             channel_names = [f"Ch{i}" for i in range(n_c)]
         elif len(channel_names) < n_c:
@@ -54,7 +54,7 @@ class TestOMETiffChannelNamesLogic:
         n_c = 5
         channel_names = ["DAPI", "GFP"]
 
-        # Simulate the logic from _load_ome_tiff (lines 632-637)
+        # Simulate the channel name adjustment logic from _load_ome_tiff
         if not channel_names:
             channel_names = [f"Ch{i}" for i in range(n_c)]
         elif len(channel_names) < n_c:
@@ -70,7 +70,7 @@ class TestOMETiffChannelNamesLogic:
         n_c = 2
         channel_names = ["DAPI", "GFP", "RFP", "Cy5", "Cy7"]
 
-        # Simulate the logic from _load_ome_tiff (lines 632-637)
+        # Simulate the channel name adjustment logic from _load_ome_tiff
         if not channel_names:
             channel_names = [f"Ch{i}" for i in range(n_c)]
         elif len(channel_names) < n_c:
@@ -86,7 +86,7 @@ class TestOMETiffChannelNamesLogic:
         n_c = 3
         channel_names = ["DAPI", "GFP", "RFP"]
 
-        # Simulate the logic from _load_ome_tiff (lines 632-637)
+        # Simulate the channel name adjustment logic from _load_ome_tiff
         if not channel_names:
             channel_names = [f"Ch{i}" for i in range(n_c)]
         elif len(channel_names) < n_c:
@@ -102,7 +102,7 @@ class TestOMETiffChannelNamesLogic:
         provided_names = ["DAPI", "GFP", "RFP"]
         ome_metadata = create_ome_metadata(provided_names)
 
-        # Simulate the parsing logic from _load_ome_tiff (lines 614-627)
+        # Simulate the OME metadata parsing logic from _load_ome_tiff
         channel_names = []
         try:
             if ome_metadata:
@@ -192,7 +192,7 @@ class TestSingleTiffChannelNamesLogic:
 
     def test_channel_names_sorted_alphabetically(self):
         """Channel names from filenames should be sorted alphabetically."""
-        # Simulate discovering channels from filenames (line 743)
+        # Simulate discovering channels from filenames in _load_single_tiff
         c_set = {"RFP", "DAPI", "GFP", "Cy5"}
         channel_names = sorted(c_set)
 
@@ -215,7 +215,7 @@ class TestSingleTiffChannelNamesLogic:
 
     def test_channel_names_stored_in_xarray_attrs(self):
         """Channel names should be stored in xarray attrs."""
-        # This tests line 822 where channel_names are stored
+        # Tests channel_names storage in xarray attrs (in _load_single_tiff)
         channel_names = ["DAPI", "GFP", "RFP"]
 
         # Simulate creating xarray attrs
@@ -230,7 +230,7 @@ class TestChannelLabelRetryMechanism:
 
     def test_generation_counter_increments(self):
         """Generation counter should increment on each update."""
-        # Simulate the generation counter logic from _set_ndv_data (line 860)
+        # Simulate the generation counter logic from _set_ndv_data
         generation = 0
 
         # First update
@@ -247,7 +247,7 @@ class TestChannelLabelRetryMechanism:
 
     def test_pending_retries_reset(self):
         """Pending retries should be reset to 20 on each update."""
-        # Simulate the retry counter logic from _set_ndv_data (line 861)
+        # Simulate the retry counter logic from _set_ndv_data
         # On each new update, pending_retries is always set to 20
         pending_retries = 20
 
@@ -255,7 +255,7 @@ class TestChannelLabelRetryMechanism:
 
     def test_stale_generation_check(self):
         """Stale generation callbacks should be detected."""
-        # Simulate the generation check from _schedule_channel_label_update (line 867)
+        # Simulate the generation check from _schedule_channel_label_update
         current_generation = 5
         callback_generation = 3
 
@@ -276,7 +276,7 @@ class TestChannelLabelRetryMechanism:
 
     def test_retry_counter_decrement(self):
         """Retry counter should decrement on each retry attempt."""
-        # Simulate the retry logic from _schedule_channel_label_update (line 887)
+        # Simulate the retry logic from _schedule_channel_label_update
         remaining = 10
 
         # After one retry attempt
@@ -286,7 +286,7 @@ class TestChannelLabelRetryMechanism:
 
     def test_retry_timeout_detection(self):
         """Should detect when retries are exhausted."""
-        # Simulate timeout detection (line 874)
+        # Simulate timeout detection in _schedule_channel_label_update
         remaining = 0
 
         should_timeout = remaining <= 0
@@ -309,7 +309,7 @@ class TestChannelLabelUpdate:
 
     def test_channel_labels_set_on_controllers(self):
         """Should set key attribute on each LUT controller."""
-        # Simulate the update logic from _update_channel_labels (lines 909-923)
+        # Simulate the update logic from _update_channel_labels
         channel_names = ["DAPI", "GFP", "RFP"]
 
         # Mock controllers dictionary
