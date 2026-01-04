@@ -64,8 +64,41 @@ try:
             QLabeledSlider._ndv_range_patch = True
     except ImportError:
         pass  # superqt not available
+
+    # Monkeypatch vispy canvas add_volume to support anisotropic voxels
+    # This allows correct 3D rendering when Z step differs from XY pixel size
+    _current_voxel_scale: Optional[Tuple[float, float, float]] = None
+
+    try:
+        from ndv.views._vispy._array_canvas import VispyArrayCanvas
+        from vispy.visuals.transforms import STTransform
+
+        if not getattr(VispyArrayCanvas, "_voxel_scale_patch", False):
+            _orig_add_volume = VispyArrayCanvas.add_volume
+
+            def _patched_add_volume(self, data=None):
+                handle = _orig_add_volume(self, data)
+                # Apply voxel scale transform if set
+                if _current_voxel_scale is not None:
+                    sx, sy, sz = _current_voxel_scale
+                    if abs(sz - 1.0) > 0.01:  # Only if significantly different from 1
+                        # Find the Volume visual and set its transform
+                        for visual in self._elements.keys():
+                            if hasattr(visual, "transform"):
+                                visual.transform = STTransform(scale=(sx, sy, sz))
+                                logger.info(
+                                    f"Applied voxel scale transform: ({sx}, {sy}, {sz})"
+                                )
+                                break
+                return handle
+
+            VispyArrayCanvas.add_volume = _patched_add_volume
+            VispyArrayCanvas._voxel_scale_patch = True
+    except ImportError:
+        pass  # vispy canvas not available
 except ImportError:
     NDV_AVAILABLE = False
+    _current_voxel_scale = None
 
 # Lazy loading
 try:
@@ -1219,10 +1252,12 @@ class LightweightViewer(QWidget):
 
     def _set_ndv_data(self, data: xr.DataArray):
         """Update NDV viewer with lazy array."""
+        global _current_voxel_scale
+
         if not NDV_AVAILABLE or not self.ndv_viewer:
             return
 
-        # Log scale information if available
+        # Log scale information and set voxel scale for 3D rendering
         pixel_size = data.attrs.get("pixel_size_um")
         dz = data.attrs.get("dz_um")
         if pixel_size is not None or dz is not None:
@@ -1233,6 +1268,16 @@ class LightweightViewer(QWidget):
                 scale_info.append(f"Z step: {dz:.4f} µm")
             logger.info("Scale metadata: %s", ", ".join(scale_info))
             print(f"Scale metadata: {', '.join(scale_info)}")
+
+            # Set voxel scale for 3D rendering (Z scaled relative to XY)
+            if pixel_size is not None and dz is not None and pixel_size > 0:
+                z_scale = dz / pixel_size
+                _current_voxel_scale = (1.0, 1.0, z_scale)
+                logger.info(f"Voxel aspect ratio (Z/XY): {z_scale:.2f}")
+            else:
+                _current_voxel_scale = None
+        else:
+            _current_voxel_scale = None
 
         luts = data.attrs.get("luts", {})
         channel_axis = data.dims.index("channel") if "channel" in data.dims else None
