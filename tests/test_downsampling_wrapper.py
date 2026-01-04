@@ -55,7 +55,7 @@ class TestDownsampling3DXarrayWrapper:
         large_size = MAX_3D_TEXTURE_SIZE + 1000  # 3048
         n_z = 10
         data = xr.DataArray(
-            np.random.randint(0, 65535, (n_z, large_size, large_size), dtype=np.uint16),
+            np.random.randint(0, 65536, (n_z, large_size, large_size), dtype=np.uint16),
             dims=["z", "y", "x"],  # Named 'z' so it's recognized as spatial
         )
         wrapper = data_wrapper_class.create(data)
@@ -71,7 +71,7 @@ class TestDownsampling3DXarrayWrapper:
         """Test that 2D slices remain at full resolution."""
         large_size = MAX_3D_TEXTURE_SIZE + 1000
         data = xr.DataArray(
-            np.random.randint(0, 65535, (10, large_size, large_size), dtype=np.uint16),
+            np.random.randint(0, 65536, (10, large_size, large_size), dtype=np.uint16),
             dims=["z", "y", "x"],
         )
         wrapper = data_wrapper_class.create(data)
@@ -110,7 +110,7 @@ class TestDownsampling3DXarrayWrapper:
         small_size = MAX_3D_TEXTURE_SIZE - 500  # 1548
         n_z = 10
         data = xr.DataArray(
-            np.random.randint(0, 65535, (n_z, small_size, small_size), dtype=np.uint16),
+            np.random.randint(0, 65536, (n_z, small_size, small_size), dtype=np.uint16),
             dims=["z", "y", "x"],
         )
         wrapper = data_wrapper_class.create(data)
@@ -161,7 +161,7 @@ class TestDownsampling3DXarrayWrapper:
         large_size = MAX_3D_TEXTURE_SIZE + 500
         n_z = 10
         data = xr.DataArray(
-            np.random.randint(0, 65535, (n_z, large_size, large_size), dtype=np.uint16),
+            np.random.randint(0, 65536, (n_z, large_size, large_size), dtype=np.uint16),
             dims=["z", "y", "x"],
         )
         wrapper = data_wrapper_class.create(data)
@@ -174,7 +174,7 @@ class TestDownsampling3DXarrayWrapper:
         """Test that downsampling uses uniform scaling (aspect ratio preserved)."""
         n_z = 10
         data = xr.DataArray(
-            np.random.randint(0, 65535, (n_z, 4000, 3000), dtype=np.uint16),
+            np.random.randint(0, 65536, (n_z, 4000, 3000), dtype=np.uint16),
             dims=["z", "y", "x"],
         )
         wrapper = data_wrapper_class.create(data)

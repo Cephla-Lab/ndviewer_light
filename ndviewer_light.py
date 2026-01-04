@@ -199,7 +199,7 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
                     else:
                         zoom_factors.append(1.0)
 
-                # Use order=0 (nearest neighbor) for speed - 90x faster than bilinear
+                # Use order=0 (nearest neighbor) for speed - much faster than bilinear
                 try:
                     downsampled = ndimage_zoom(data, zoom_factors, order=0)
                     return downsampled.astype(data.dtype)
