@@ -38,7 +38,7 @@ pytest tests/test_channel_names.py::TestOMETiffChannelNamesLogic::test_empty_cha
 
 ### test_channel_names.py
 
-Comprehensive unit tests for the channel name display feature. Tests cover three main areas:
+Comprehensive unit tests for the channel name display feature. Tests cover five main areas:
 
 #### 1. OME-TIFF Channel Name Logic (`TestOMETiffChannelNamesLogic`)
 
