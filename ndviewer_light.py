@@ -1027,7 +1027,7 @@ class LightweightViewer(QWidget):
         if not self.ndv_viewer or self._xarray_data is None:
             return
 
-        remaining = getattr(self, "_pending_channel_label_retries", 0)
+        remaining = self._pending_channel_label_retries
         if remaining <= 0:
             logger.warning("Channel label update timed out - labels may show numeric indices")
             return
@@ -1064,7 +1064,7 @@ class LightweightViewer(QWidget):
             if not controllers:
                 return
 
-            updated_count = 0
+            updated_names = []
             for i, name in enumerate(channel_names):
                 if i in controllers:
                     controller = controllers[i]
@@ -1080,10 +1080,8 @@ class LightweightViewer(QWidget):
                             i,
                             name,
                         )
-                    updated_count += 1
-            logger.debug(
-                "Updated %d channel labels: %s", updated_count, channel_names[:updated_count]
-            )
+                    updated_names.append(name)
+            logger.debug("Updated %d channel labels: %s", len(updated_names), updated_names)
         except Exception as e:
             logger.debug("Failed to update channel labels: %s", e)
 
