@@ -5,11 +5,12 @@ Supports: OME-TIFF and single-TIFF acquisitions with lazy loading via dask.
 Lazy loading enables fast initial display by only reading image planes on-demand.
 """
 
+import json
 import logging
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 
 import numpy as np
@@ -275,6 +276,117 @@ def extract_wavelength(channel_str: str):
         val = int(numbers[-1])
         return val if val > 0 else None
     return None
+
+
+def extract_ome_physical_sizes(
+    ome_metadata: str,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Extract physical pixel sizes from OME-XML metadata.
+
+    Returns:
+        Tuple of (pixel_size_x_um, pixel_size_y_um, pixel_size_z_um).
+        Values are in micrometers. None if not found or unable to parse.
+    """
+    if not ome_metadata:
+        return None, None, None
+
+    try:
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(ome_metadata)
+        # Try multiple OME namespace versions
+        namespaces = [
+            {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"},
+            {"ome": "http://www.openmicroscopy.org/Schemas/OME/2015-01"},
+            {"ome": "http://www.openmicroscopy.org/Schemas/OME/2013-06"},
+            {},  # No namespace fallback
+        ]
+
+        for ns in namespaces:
+            # Find Pixels element which contains physical size attributes
+            if ns:
+                pixels = root.find(".//ome:Pixels", ns)
+            else:
+                # Try without namespace
+                pixels = root.find(".//{*}Pixels")
+                if pixels is None:
+                    pixels = root.find(".//Pixels")
+
+            if pixels is not None:
+                size_x = pixels.get("PhysicalSizeX")
+                size_y = pixels.get("PhysicalSizeY")
+                size_z = pixels.get("PhysicalSizeZ")
+                unit_x = pixels.get("PhysicalSizeXUnit", "µm")
+                unit_y = pixels.get("PhysicalSizeYUnit", "µm")
+                unit_z = pixels.get("PhysicalSizeZUnit", "µm")
+
+                def to_micrometers(value: Optional[str], unit: str) -> Optional[float]:
+                    if value is None:
+                        return None
+                    try:
+                        val = float(value)
+                        # Convert to micrometers based on unit
+                        unit_lower = unit.lower()
+                        if unit_lower in ("nm", "nanometer", "nanometers"):
+                            return val / 1000.0
+                        elif unit_lower in ("mm", "millimeter", "millimeters"):
+                            return val * 1000.0
+                        elif unit_lower in ("m", "meter", "meters"):
+                            return val * 1e6
+                        # Default assumes micrometers (µm, um, micron, etc.)
+                        return val
+                    except (ValueError, TypeError):
+                        return None
+
+                px = to_micrometers(size_x, unit_x)
+                py = to_micrometers(size_y, unit_y)
+                pz = to_micrometers(size_z, unit_z)
+
+                if px is not None or py is not None or pz is not None:
+                    return px, py, pz
+
+    except Exception as e:
+        logger.debug("Failed to extract physical sizes from OME metadata: %s", e)
+
+    return None, None, None
+
+
+def read_acquisition_parameters(
+    base_path: Path,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Read pixel size and dz from acquisition_parameters.json.
+
+    Returns:
+        Tuple of (pixel_size_um, dz_um). None if not found.
+    """
+    params_file = base_path / "acquisition_parameters.json"
+    if not params_file.exists():
+        return None, None
+
+    try:
+        with open(params_file, "r") as f:
+            params = json.load(f)
+
+        pixel_size = None
+        dz = None
+
+        # Try common key names for pixel size
+        for key in ["pixel_size_um", "pixel_size", "pixelSize", "pixel_size_xy"]:
+            if key in params:
+                pixel_size = float(params[key])
+                break
+
+        # Try common key names for z spacing
+        for key in ["dz_um", "dz", "z_step", "zStep", "z_spacing", "pixel_size_z"]:
+            if key in params:
+                dz = float(params[key])
+                break
+
+        return pixel_size, dz
+
+    except Exception as e:
+        logger.debug("Failed to read acquisition_parameters.json: %s", e)
+        return None, None
 
 
 def detect_format(base_path: Path) -> str:
@@ -764,6 +876,7 @@ class LightweightViewer(QWidget):
                 height = shape_dict.get("Y", shape[-2])
                 width = shape_dict.get("X", shape[-1])
                 channel_names = []
+                pixel_size_x, pixel_size_y, pixel_size_z = None, None, None
                 try:
                     if tif.ome_metadata:
                         import xml.etree.ElementTree as ET
@@ -776,6 +889,11 @@ class LightweightViewer(QWidget):
                             name = ch.get("Name") or ch.get("ID", "")
                             if name:
                                 channel_names.append(name)
+
+                        # Extract physical pixel sizes
+                        pixel_size_x, pixel_size_y, pixel_size_z = (
+                            extract_ome_physical_sizes(tif.ome_metadata)
+                        )
                 except Exception as e:
                     logger.debug("Failed to parse OME metadata: %s", e)
 
@@ -845,6 +963,21 @@ class LightweightViewer(QWidget):
             xarr = xarr.transpose("time", "fov", "z", "channel", "y", "x")
             xarr.attrs["luts"] = luts
             xarr.attrs["_open_tifs"] = tifs_kept
+
+            # Store physical pixel sizes (in micrometers)
+            if pixel_size_x is not None:
+                xarr.attrs["pixel_size_x_um"] = pixel_size_x
+            if pixel_size_y is not None:
+                xarr.attrs["pixel_size_y_um"] = pixel_size_y
+            if pixel_size_z is not None:
+                xarr.attrs["pixel_size_z_um"] = pixel_size_z
+            # Also store commonly used aliases
+            if pixel_size_x is not None and pixel_size_y is not None:
+                # Use average for isotropic XY pixel size
+                xarr.attrs["pixel_size_um"] = (pixel_size_x + pixel_size_y) / 2
+            if pixel_size_z is not None:
+                xarr.attrs["dz_um"] = pixel_size_z
+
             return xarr
         except Exception as e:
             print(f"OME-TIFF load error: {e}")
@@ -952,6 +1085,9 @@ class LightweightViewer(QWidget):
                 _block_loader, dummy, dtype=np.uint16, chunks=chunks
             )
 
+            # Read acquisition parameters for pixel size and dz
+            pixel_size_um, dz_um = read_acquisition_parameters(base_path)
+
             xarr = xr.DataArray(
                 stacked,
                 dims=["time", "fov", "z", "channel", "y", "x"],
@@ -963,6 +1099,16 @@ class LightweightViewer(QWidget):
                 },
             )
             xarr.attrs["luts"] = luts
+
+            # Store physical pixel sizes (in micrometers)
+            if pixel_size_um is not None:
+                xarr.attrs["pixel_size_um"] = pixel_size_um
+                xarr.attrs["pixel_size_x_um"] = pixel_size_um
+                xarr.attrs["pixel_size_y_um"] = pixel_size_um
+            if dz_um is not None:
+                xarr.attrs["dz_um"] = dz_um
+                xarr.attrs["pixel_size_z_um"] = dz_um
+
             return xarr
         except Exception as e:
             print(f"Single-TIFF load error: {e}")
@@ -975,6 +1121,18 @@ class LightweightViewer(QWidget):
         """Update NDV viewer with lazy array."""
         if not NDV_AVAILABLE or not self.ndv_viewer:
             return
+
+        # Log scale information if available
+        pixel_size = data.attrs.get("pixel_size_um")
+        dz = data.attrs.get("dz_um")
+        if pixel_size is not None or dz is not None:
+            scale_info = []
+            if pixel_size is not None:
+                scale_info.append(f"XY pixel size: {pixel_size:.4f} µm")
+            if dz is not None:
+                scale_info.append(f"Z step: {dz:.4f} µm")
+            logger.info("Scale metadata: %s", ", ".join(scale_info))
+            print(f"Scale metadata: {', '.join(scale_info)}")
 
         luts = data.attrs.get("luts", {})
         channel_axis = data.dims.index("channel") if "channel" in data.dims else None
