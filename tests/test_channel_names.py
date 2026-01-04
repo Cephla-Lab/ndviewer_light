@@ -159,7 +159,7 @@ class TestOMETiffChannelNamesLogic:
         ch1.set("Name", "DAPI")
 
         # Channel without Name attribute (intentionally unnamed)
-        ET.SubElement(
+        _ = ET.SubElement(
             pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel"
         )
 
