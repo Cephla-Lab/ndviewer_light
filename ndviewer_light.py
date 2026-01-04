@@ -493,6 +493,86 @@ def read_acquisition_parameters(
         return None, None
 
 
+def read_tiff_pixel_size(tiff_path: str) -> Optional[float]:
+    """Read pixel size from TIFF metadata tags.
+
+    Attempts to extract pixel size from:
+    1. XResolution/YResolution tags with ResolutionUnit (inch or cm only)
+    2. ImageDescription tag (JSON metadata from some microscopy software)
+
+    Returns:
+        Pixel size in micrometers, or None if not found.
+    """
+    if not LAZY_LOADING_AVAILABLE:
+        return None
+
+    try:
+        with tf.TiffFile(tiff_path) as tif:
+            page = tif.pages[0]
+
+            # Try ImageDescription tag FIRST for JSON metadata
+            # (more reliable for microscopy data)
+            desc = page.tags.get("ImageDescription")
+            if desc is not None:
+                desc_str = desc.value
+                if isinstance(desc_str, bytes):
+                    desc_str = desc_str.decode("utf-8", errors="ignore")
+
+                # Try to parse as JSON
+                try:
+                    metadata = json.loads(desc_str)
+                    for key in [
+                        "pixel_size_um",
+                        "pixel_size",
+                        "PixelSize",
+                        "pixelSize",
+                    ]:
+                        if key in metadata:
+                            val = float(metadata[key])
+                            if 0.01 < val < 100:  # Sanity check
+                                return val
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+            # Try XResolution/YResolution tags with proper unit
+            x_res = page.tags.get("XResolution")
+            res_unit = page.tags.get("ResolutionUnit")
+
+            # Only use resolution tags if we have a proper unit (inch=2 or cm=3)
+            unit_value = res_unit.value if res_unit else 1
+            if unit_value not in (2, 3):
+                return None  # No unit or unknown unit - can't reliably convert
+
+            if x_res is not None:
+                # XResolution is stored as a fraction (numerator, denominator)
+                x_res_value = x_res.value
+                if isinstance(x_res_value, tuple) and len(x_res_value) == 2:
+                    pixels_per_unit = x_res_value[0] / x_res_value[1]
+                else:
+                    pixels_per_unit = float(x_res_value)
+
+                # Skip default value (1, 1)
+                if pixels_per_unit <= 1:
+                    return None
+
+                if pixels_per_unit > 0:
+                    if unit_value == 2:  # inch
+                        # pixels/inch -> um/pixel: 25400 um/inch / pixels_per_inch
+                        pixel_size_um = 25400.0 / pixels_per_unit
+                    else:  # centimeter (unit_value == 3)
+                        # pixels/cm -> um/pixel: 10000 um/cm / pixels_per_cm
+                        pixel_size_um = 10000.0 / pixels_per_unit
+
+                    if 0.01 < pixel_size_um < 100:
+                        # Sanity check: typical microscopy pixel sizes are 0.1-10 um
+                        return pixel_size_um
+
+    except Exception as e:
+        logger.debug("Failed to read pixel size from TIFF tags: %s", e)
+
+    return None
+
+
 def detect_format(base_path: Path) -> str:
     """Detect OME-TIFF vs single-TIFF format."""
     ome_dir = base_path / "ome_tiff"
@@ -1191,6 +1271,10 @@ class LightweightViewer(QWidget):
 
             # Read acquisition parameters for pixel size and dz
             pixel_size_um, dz_um = read_acquisition_parameters(base_path)
+
+            # Fallback: try reading pixel size from TIFF metadata tags
+            if pixel_size_um is None and sample is not None:
+                pixel_size_um = read_tiff_pixel_size(sample)
 
             xarr = xr.DataArray(
                 stacked,
