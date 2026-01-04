@@ -32,11 +32,11 @@ def generate_3d_test_volume(
         pixel_z: Z step size in micrometers
 
     Returns:
-        Tuple of (volume as uint16 array, tmpdir Path)
+        Tuple of (volume as uint16 array, tmp_dir Path)
     """
     # Create output directory with proper structure for ndviewer_light
-    tmpdir = Path(tempfile.mkdtemp(prefix="ndv_3d_test_"))
-    subdir = tmpdir / "0"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ndv_3d_test_"))
+    subdir = tmp_dir / "0"
     subdir.mkdir()
 
     # Create coordinate grids in physical units
@@ -92,10 +92,10 @@ def generate_3d_test_volume(
 
     # Create acquisition parameters
     params = {"pixel_size_um": pixel_xy, "dz_um": pixel_z}
-    with open(tmpdir / "acquisition_parameters.json", "w") as f:
+    with open(tmp_dir / "acquisition_parameters.json", "w") as f:
         json.dump(params, f)
 
-    return volume, tmpdir
+    return volume, tmp_dir
 
 
 def main():
@@ -106,12 +106,12 @@ def main():
     print("  Z aspect ratio: 3x")
     print()
 
-    volume, tmpdir = generate_3d_test_volume()
+    volume, tmp_dir = generate_3d_test_volume()
 
     print(f"Volume shape: {volume.shape}")
     print(f"Value range: {volume.min()} - {volume.max()}")
     print(f"Mean intensity: {volume.mean():.0f}")
-    print(f"Dataset saved to: {tmpdir}")
+    print(f"Dataset saved to: {tmp_dir}")
     print()
 
     # Try to launch viewer
@@ -126,13 +126,13 @@ def main():
         print()
 
         app = QApplication(sys.argv)
-        window = LightweightMainWindow(str(tmpdir))
+        window = LightweightMainWindow(str(tmp_dir))
         window.show()
         sys.exit(app.exec_())
 
     except ImportError as e:
         print(f"Could not launch viewer: {e}")
-        print(f"Run manually: python ndviewer_light.py {tmpdir}")
+        print(f"Run manually: python ndviewer_light.py {tmp_dir}")
 
 
 if __name__ == "__main__":

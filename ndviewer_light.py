@@ -134,7 +134,6 @@ try:
                 self._index_buffer.set_data(indices)
 
             VolumeVisual._create_vertex_data = _patched_create_vertex_data
-            VolumeVisual.__init__ = _patched_init
             VolumeVisual._voxel_scale_patch = True
             logger.info("Voxel scale patch applied to VolumeVisual")
 
@@ -550,9 +549,9 @@ def read_acquisition_parameters(
 def read_tiff_pixel_size(tiff_path: str) -> Optional[float]:
     """Read pixel size from TIFF metadata tags.
 
-    Attempts to extract pixel size from:
-    1. XResolution/YResolution tags with ResolutionUnit (inch or cm only)
-    2. ImageDescription tag (JSON metadata from some microscopy software)
+    Attempts to extract pixel size from (in priority order):
+    1. ImageDescription tag (JSON metadata from some microscopy software)
+    2. XResolution/YResolution tags with ResolutionUnit (inch or cm only)
 
     Returns:
         Pixel size in micrometers, or None if not found.

@@ -313,10 +313,6 @@ class TestReadAcquisitionParameters:
 class TestReadTiffPixelSize:
     """Test suite for TIFF tag pixel size extraction."""
 
-    @pytest.mark.skipif(
-        not pytest.importorskip("tifffile", reason="tifffile not available"),
-        reason="tifffile not available",
-    )
     def test_tiff_with_resolution_tags_inch(self):
         """Test reading pixel size from TIFF with inch-based resolution.
 
@@ -324,7 +320,7 @@ class TestReadTiffPixelSize:
         can vary between versions. The test is skipped if tifffile is not
         available or if the resolution tags are not written as expected.
         """
-        import tifffile
+        tifffile = pytest.importorskip("tifffile")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tiff_path = Path(tmpdir) / "test.tiff"
@@ -349,17 +345,13 @@ class TestReadTiffPixelSize:
             # 25400 um/inch / 78740 pixels/inch ≈ 0.3226 um/pixel
             assert pixel_size == pytest.approx(0.3226, rel=0.01)
 
-    @pytest.mark.skipif(
-        not pytest.importorskip("tifffile", reason="tifffile not available"),
-        reason="tifffile not available",
-    )
     def test_tiff_with_resolution_tags_cm(self):
         """Test reading pixel size from TIFF with cm-based resolution.
 
         Note: This test depends on tifffile's resolution tag handling which
         can vary between versions.
         """
-        import tifffile
+        tifffile = pytest.importorskip("tifffile")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tiff_path = Path(tmpdir) / "test.tiff"
@@ -384,13 +376,9 @@ class TestReadTiffPixelSize:
             # 10000 um/cm / 30769 pixels/cm ≈ 0.325 um/pixel
             assert pixel_size == pytest.approx(0.325, rel=0.01)
 
-    @pytest.mark.skipif(
-        not pytest.importorskip("tifffile", reason="tifffile not available"),
-        reason="tifffile not available",
-    )
     def test_tiff_with_json_imagedescription(self):
         """Test reading pixel size from JSON in ImageDescription tag."""
-        import tifffile
+        tifffile = pytest.importorskip("tifffile")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tiff_path = Path(tmpdir) / "test.tiff"
