@@ -396,7 +396,7 @@ class TestReadTiffPixelSize:
 
     def test_tiff_without_metadata(self):
         """Test with TIFF that has no resolution metadata."""
-        import tifffile
+        tifffile = pytest.importorskip("tifffile")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tiff_path = Path(tmpdir) / "test.tiff"

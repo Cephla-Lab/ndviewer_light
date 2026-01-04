@@ -7,6 +7,11 @@ NOT run during CI - use for manual visual testing only.
 
 Usage:
     python tests/test_3d_visualization.py
+
+Note:
+    Test data is saved to a temporary directory (e.g., /tmp/ndv_3d_test_*).
+    These directories are NOT automatically cleaned up to allow inspection
+    after the viewer closes. Remove manually with: rm -rf /tmp/ndv_3d_test_*
 """
 
 import numpy as np

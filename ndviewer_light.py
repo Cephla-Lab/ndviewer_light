@@ -448,13 +448,18 @@ def extract_ome_physical_sizes(
                         # Convert to micrometers based on unit
                         unit_lower = unit.lower()
                         if unit_lower in ("nm", "nanometer", "nanometers"):
-                            return val / 1000.0
+                            result = val / 1000.0
                         elif unit_lower in ("mm", "millimeter", "millimeters"):
-                            return val * 1000.0
+                            result = val * 1000.0
                         elif unit_lower in ("m", "meter", "meters"):
-                            return val * 1e6
-                        # Default assumes micrometers (µm, um, micron, etc.)
-                        return val
+                            result = val * 1e6
+                        else:
+                            # Default assumes micrometers (µm, um, micron, etc.)
+                            result = val
+                        # Physical sizes must be strictly positive
+                        if result <= 0:
+                            return None
+                        return result
                     except (ValueError, TypeError):
                         return None
 
@@ -527,7 +532,11 @@ def read_acquisition_parameters(
                     )
                 else:
                     actual_mag = float(nominal_mag)
-                pixel_size = float(sensor_pixel) / actual_mag
+                computed = float(sensor_pixel) / actual_mag
+                # Sanity check: typical microscopy pixel sizes are 0.1-10 µm
+                # Range 0.01-100 µm covers most use cases including low-mag imaging
+                if 0.01 < computed < 100:
+                    pixel_size = computed
 
         # Try common key names for z spacing
         for key in [
@@ -540,8 +549,14 @@ def read_acquisition_parameters(
             "dz(um)",
         ]:
             if key in params:
-                dz = float(params[key])
-                break
+                try:
+                    candidate_dz = float(params[key])
+                except (TypeError, ValueError):
+                    continue
+                # dz must be strictly positive to be physically meaningful
+                if candidate_dz > 0:
+                    dz = candidate_dz
+                    break
 
         return pixel_size, dz
 
@@ -555,7 +570,12 @@ def read_tiff_pixel_size(tiff_path: str) -> Optional[float]:
 
     Attempts to extract pixel size from (in priority order):
     1. ImageDescription tag (JSON metadata from some microscopy software)
-    2. XResolution/YResolution tags with ResolutionUnit (inch or cm only)
+    2. XResolution/YResolution tags with ResolutionUnit
+
+    Note on ResolutionUnit: Only inch (2) and centimeter (3) units are supported.
+    Unit value 1 ("no absolute unit") is explicitly rejected because it cannot
+    be reliably converted to physical units. Many image editors set resolution
+    tags without meaningful physical units, so we require explicit inch/cm units.
 
     Returns:
         Pixel size in micrometers, or None if not found.
