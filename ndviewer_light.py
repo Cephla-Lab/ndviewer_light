@@ -37,6 +37,9 @@ LIVE_REFRESH_INTERVAL_MS = 750
 
 logger = logging.getLogger(__name__)
 
+# Module-level variable for voxel scale (used by monkey-patched add_volume)
+_current_voxel_scale: Optional[Tuple[float, float, float]] = None
+
 # NDV viewer
 try:
     import ndv
@@ -65,40 +68,82 @@ try:
     except ImportError:
         pass  # superqt not available
 
-    # Monkeypatch vispy canvas add_volume to support anisotropic voxels
+    # Monkeypatch vispy VolumeVisual to support anisotropic voxels
     # This allows correct 3D rendering when Z step differs from XY pixel size
-    _current_voxel_scale: Optional[Tuple[float, float, float]] = None
-
     try:
         from ndv.views._vispy._array_canvas import VispyArrayCanvas
-        from vispy.visuals.transforms import STTransform
+        from vispy.visuals.volume import VolumeVisual
 
-        if not getattr(VispyArrayCanvas, "_voxel_scale_patch", False):
+        if not getattr(VolumeVisual, "_voxel_scale_patch", False):
+            _orig_create_vertex_data = VolumeVisual._create_vertex_data
+
+            def _patched_create_vertex_data(self):
+                """Create vertices with Z scaling for anisotropic voxels."""
+                global _current_voxel_scale
+                shape = self._vol_shape
+
+                # Get corner coordinates with Z scaling
+                x0, x1 = -0.5, shape[2] - 0.5
+                y0, y1 = -0.5, shape[1] - 0.5
+
+                # Apply Z scale if set
+                if _current_voxel_scale is not None:
+                    sz = _current_voxel_scale[2]
+                    z0, z1 = -0.5 * sz, (shape[0] - 0.5) * sz
+                else:
+                    z0, z1 = -0.5, shape[0] - 0.5
+
+                pos = np.array([
+                    [x0, y0, z0],
+                    [x1, y0, z0],
+                    [x0, y1, z0],
+                    [x1, y1, z0],
+                    [x0, y0, z1],
+                    [x1, y0, z1],
+                    [x0, y1, z1],
+                    [x1, y1, z1],
+                ], dtype=np.float32)
+
+                indices = np.array([2, 6, 0, 4, 5, 6, 7, 2, 3, 0, 1, 5, 3, 7],
+                                   dtype=np.uint32)
+
+                self._vertices.set_data(pos)
+                self._index_buffer.set_data(indices)
+
+            VolumeVisual._create_vertex_data = _patched_create_vertex_data
+            VolumeVisual._voxel_scale_patch = True
+            logger.info("Voxel scale patch applied to VolumeVisual._create_vertex_data")
+
+        # Also patch add_volume to update camera range
+        if not getattr(VispyArrayCanvas, "_camera_scale_patch", False):
             _orig_add_volume = VispyArrayCanvas.add_volume
 
             def _patched_add_volume(self, data=None):
+                global _current_voxel_scale
                 handle = _orig_add_volume(self, data)
-                # Apply voxel scale transform if set
-                if _current_voxel_scale is not None:
-                    sx, sy, sz = _current_voxel_scale
-                    if abs(sz - 1.0) > 0.01:  # Only if significantly different from 1
-                        # Find the Volume visual and set its transform
-                        for visual in self._elements.keys():
-                            if hasattr(visual, "transform"):
-                                visual.transform = STTransform(scale=(sx, sy, sz))
-                                logger.info(
-                                    f"Applied voxel scale transform: ({sx}, {sy}, {sz})"
-                                )
-                                break
+                # Update camera to account for scaled Z dimension
+                if _current_voxel_scale is not None and data is not None:
+                    sz = _current_voxel_scale[2]
+                    if abs(sz - 1.0) > 0.01:
+                        z_size = data.shape[0] * sz
+                        max_size = max(data.shape[1], data.shape[2], z_size)
+                        # Add margin to scale_factor for comfortable viewing distance
+                        self._camera.scale_factor = max_size + 6
+                        self._view.camera.set_range(
+                            x=(0, data.shape[2]),
+                            y=(0, data.shape[1]),
+                            z=(0, z_size),
+                            margin=0.01
+                        )
                 return handle
 
             VispyArrayCanvas.add_volume = _patched_add_volume
-            VispyArrayCanvas._voxel_scale_patch = True
+            VispyArrayCanvas._camera_scale_patch = True
     except ImportError:
-        pass  # vispy canvas not available
+        pass  # vispy not available
+
 except ImportError:
     NDV_AVAILABLE = False
-    _current_voxel_scale = None
 
 # Lazy loading
 try:
@@ -223,10 +268,6 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
                 dim_info.append((str(dim).lower(), data.shape[len(dim_info)]))
 
             # Compute zoom factors for downsampling
-            # Note: Physical pixel sizes (pixel_size_um, dz_um) are stored in attrs
-            # for reference but not used for aspect ratio correction during rendering.
-            # NDV/vispy assumes isotropic voxels; applying scale transforms would
-            # require deeper integration with the renderer.
             zoom_factors, needs_downsampling = self._compute_simple_zoom_factors(
                 dim_info, max_texture_size, spatial_z_names
             )
@@ -256,6 +297,9 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
             - XY: scaled uniformly (same factor for X and Y) to preserve XY aspect ratio
             - Z: scaled independently only if it exceeds the texture limit
             - Non-spatial dims (channel, time, fov): never scaled
+
+            Note: Physical aspect ratio correction is handled via vertex scaling
+            in the vispy VolumeVisual patch.
             """
             # Calculate xy scale factor (uniform for x and y to preserve XY aspect)
             xy_sizes = [size for name, size in dim_info if name in {"y", "x"}]
@@ -403,12 +447,18 @@ def extract_ome_physical_sizes(
 def read_acquisition_parameters(
     base_path: Path,
 ) -> Tuple[Optional[float], Optional[float]]:
-    """Read pixel size and dz from acquisition_parameters.json.
+    """Read pixel size and dz from acquisition parameters JSON file.
+
+    Supports both "acquisition_parameters.json" and "acquisition parameters.json".
+    Can compute pixel size from sensor_pixel_size_um and objective magnification.
 
     Returns:
         Tuple of (pixel_size_um, dz_um). None if not found.
     """
+    # Try both filename variants
     params_file = base_path / "acquisition_parameters.json"
+    if not params_file.exists():
+        params_file = base_path / "acquisition parameters.json"
     if not params_file.exists():
         return None, None
 
@@ -419,14 +469,35 @@ def read_acquisition_parameters(
         pixel_size = None
         dz = None
 
-        # Try common key names for pixel size
+        # Try direct pixel size keys first
         for key in ["pixel_size_um", "pixel_size", "pixelSize", "pixel_size_xy"]:
             if key in params:
                 pixel_size = float(params[key])
                 break
 
+        # If not found, compute from sensor pixel size and magnification
+        # Account for tube lens ratio: actual_mag = nominal_mag × (tube_lens / obj_tube_lens)
+        if pixel_size is None:
+            sensor_pixel = params.get("sensor_pixel_size_um")
+            objective = params.get("objective", {})
+            if isinstance(objective, dict):
+                nominal_mag = objective.get("magnification")
+                obj_tube_lens = objective.get("tube_lens_f_mm")
+            else:
+                nominal_mag = None
+                obj_tube_lens = None
+            tube_lens = params.get("tube_lens_mm")
+
+            if sensor_pixel is not None and nominal_mag is not None and nominal_mag > 0:
+                # Compute actual magnification with tube lens correction
+                if tube_lens is not None and obj_tube_lens is not None and obj_tube_lens > 0:
+                    actual_mag = float(nominal_mag) * (float(tube_lens) / float(obj_tube_lens))
+                else:
+                    actual_mag = float(nominal_mag)
+                pixel_size = float(sensor_pixel) / actual_mag
+
         # Try common key names for z spacing
-        for key in ["dz_um", "dz", "z_step", "zStep", "z_spacing", "pixel_size_z"]:
+        for key in ["dz_um", "dz", "z_step", "zStep", "z_spacing", "pixel_size_z", "dz(um)"]:
             if key in params:
                 dz = float(params[key])
                 break
@@ -434,7 +505,7 @@ def read_acquisition_parameters(
         return pixel_size, dz
 
     except Exception as e:
-        logger.debug("Failed to read acquisition_parameters.json: %s", e)
+        logger.debug("Failed to read acquisition parameters: %s", e)
         return None, None
 
 
@@ -1266,7 +1337,6 @@ class LightweightViewer(QWidget):
                 scale_info.append(f"XY pixel size: {pixel_size:.4f} µm")
             if dz is not None:
                 scale_info.append(f"Z step: {dz:.4f} µm")
-            logger.info("Scale metadata: %s", ", ".join(scale_info))
             print(f"Scale metadata: {', '.join(scale_info)}")
 
             # Set voxel scale for 3D rendering (Z scaled relative to XY)

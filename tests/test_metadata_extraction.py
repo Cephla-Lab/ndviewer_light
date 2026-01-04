@@ -196,6 +196,119 @@ class TestReadAcquisitionParameters:
             assert pixel_size is None
             assert dz is None
 
+    def test_filename_with_space(self):
+        """Test reading from 'acquisition parameters.json' (with space)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = {"pixel_size_um": 0.325, "dz_um": 1.5}
+            params_file = Path(tmpdir) / "acquisition parameters.json"
+            with open(params_file, "w") as f:
+                json.dump(params, f)
+
+            pixel_size, dz = read_acquisition_parameters(Path(tmpdir))
+
+            assert pixel_size == pytest.approx(0.325)
+            assert dz == pytest.approx(1.5)
+
+    def test_dz_um_with_parentheses(self):
+        """Test reading dz from 'dz(um)' key format."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = {"pixel_size_um": 0.5, "dz(um)": 50.0}
+            params_file = Path(tmpdir) / "acquisition_parameters.json"
+            with open(params_file, "w") as f:
+                json.dump(params, f)
+
+            pixel_size, dz = read_acquisition_parameters(Path(tmpdir))
+
+            assert pixel_size == pytest.approx(0.5)
+            assert dz == pytest.approx(50.0)
+
+    def test_computed_pixel_size_from_magnification(self):
+        """Test computing pixel size from sensor_pixel_size_um and magnification."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = {
+                "sensor_pixel_size_um": 3.76,
+                "objective": {"magnification": 20.0},
+                "dz(um)": 50.0,
+            }
+            params_file = Path(tmpdir) / "acquisition_parameters.json"
+            with open(params_file, "w") as f:
+                json.dump(params, f)
+
+            pixel_size, dz = read_acquisition_parameters(Path(tmpdir))
+
+            # pixel_size = 3.76 / 20 = 0.188
+            assert pixel_size == pytest.approx(0.188)
+            assert dz == pytest.approx(50.0)
+
+    def test_computed_pixel_size_with_tube_lens_correction(self):
+        """Test pixel size computation with tube lens ratio correction.
+
+        actual_mag = nominal_mag × (tube_lens / obj_tube_lens)
+        pixel_size = sensor_pixel_size / actual_mag
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = {
+                "sensor_pixel_size_um": 3.76,
+                "objective": {
+                    "magnification": 20.0,
+                    "tube_lens_f_mm": 180.0,  # Objective designed for 180mm
+                },
+                "tube_lens_mm": 200.0,  # Using 200mm tube lens
+                "dz(um)": 50.0,
+            }
+            params_file = Path(tmpdir) / "acquisition_parameters.json"
+            with open(params_file, "w") as f:
+                json.dump(params, f)
+
+            pixel_size, dz = read_acquisition_parameters(Path(tmpdir))
+
+            # actual_mag = 20 × (200/180) = 22.222
+            # pixel_size = 3.76 / 22.222 = 0.1692
+            expected_mag = 20.0 * (200.0 / 180.0)
+            expected_pixel = 3.76 / expected_mag
+            assert pixel_size == pytest.approx(expected_pixel)
+            assert dz == pytest.approx(50.0)
+
+    def test_tube_lens_same_as_objective(self):
+        """Test when tube lens matches objective's designed tube lens."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = {
+                "sensor_pixel_size_um": 3.76,
+                "objective": {
+                    "magnification": 20.0,
+                    "tube_lens_f_mm": 180.0,
+                },
+                "tube_lens_mm": 180.0,  # Same as objective's designed tube lens
+                "dz(um)": 50.0,
+            }
+            params_file = Path(tmpdir) / "acquisition_parameters.json"
+            with open(params_file, "w") as f:
+                json.dump(params, f)
+
+            pixel_size, dz = read_acquisition_parameters(Path(tmpdir))
+
+            # actual_mag = 20 × (180/180) = 20
+            # pixel_size = 3.76 / 20 = 0.188
+            assert pixel_size == pytest.approx(0.188)
+            assert dz == pytest.approx(50.0)
+
+    def test_direct_pixel_size_takes_precedence(self):
+        """Test that direct pixel_size_um takes precedence over computed value."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = {
+                "pixel_size_um": 0.5,  # Direct value
+                "sensor_pixel_size_um": 3.76,  # Would compute to 0.188
+                "objective": {"magnification": 20.0},
+            }
+            params_file = Path(tmpdir) / "acquisition_parameters.json"
+            with open(params_file, "w") as f:
+                json.dump(params, f)
+
+            pixel_size, dz = read_acquisition_parameters(Path(tmpdir))
+
+            # Direct value should be used, not computed
+            assert pixel_size == pytest.approx(0.5)
+
 
 class TestReadTiffPixelSize:
     """Test suite for TIFF tag pixel size extraction."""
