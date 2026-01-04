@@ -278,17 +278,16 @@ class TestDownsampling3DXarrayWrapper:
         # z is also scaled (it's a spatial dimension)
         assert result.shape[0] <= n_z
 
-    def test_physical_aspect_ratio_preserved(self, data_wrapper_class):
-        """Test that physical aspect ratio is preserved when pixel sizes are known.
+    def test_pixel_sizes_in_attrs_preserved(self, data_wrapper_class):
+        """Test that pixel size attrs are preserved through the wrapper.
 
-        When pixel_size_um and dz_um are set in attrs, the downsampling should
-        adjust all axes to maintain correct physical proportions.
+        Physical pixel sizes (pixel_size_um, dz_um) are stored in attrs for
+        reference but don't affect downsampling (NDV assumes isotropic voxels).
         """
-        # Create data where XY needs downsampling but Z doesn't
         large_size = MAX_3D_TEXTURE_SIZE + 500
         n_z = 50
         pixel_size_xy = 0.325  # µm per XY pixel
-        pixel_size_z = 1.5  # µm per Z step (Z is ~4.6x coarser than XY)
+        pixel_size_z = 1.5  # µm per Z step
 
         data = xr.DataArray(
             np.random.randint(0, 65536, (n_z, large_size, large_size), dtype=np.uint16),
@@ -296,82 +295,14 @@ class TestDownsampling3DXarrayWrapper:
             attrs={"pixel_size_um": pixel_size_xy, "dz_um": pixel_size_z},
         )
         wrapper = data_wrapper_class.create(data)
+
+        # Verify attrs are accessible
+        assert wrapper._data.attrs.get("pixel_size_um") == pixel_size_xy
+        assert wrapper._data.attrs.get("dz_um") == pixel_size_z
 
         # Request full 3D volume
         result = wrapper.isel({0: slice(None), 1: slice(None), 2: slice(None)})
 
-        # Compute expected aspect ratio
-        # Physical dimensions: XY = large_size * 0.325, Z = 50 * 1.5
-        physical_xy = large_size * pixel_size_xy
-        physical_z = n_z * pixel_size_z
-
-        # After downsampling, the voxel aspect ratio should match physical aspect ratio
-        # result_z / result_xy ≈ physical_z / physical_xy
-        result_z = result.shape[0]
-        result_xy = result.shape[1]  # y dimension
-
-        # The ratio of output dimensions should match physical ratio
-        output_ratio = result_z / result_xy
-        physical_ratio = physical_z / physical_xy
-
-        # Allow 10% tolerance due to integer rounding
-        assert abs(output_ratio - physical_ratio) / physical_ratio < 0.1, (
-            f"Output aspect ratio {output_ratio:.3f} doesn't match "
-            f"physical ratio {physical_ratio:.3f}"
-        )
-
-    def test_physical_aspect_ratio_z_upsampling(self, data_wrapper_class):
-        """Test that Z is upsampled when needed to maintain aspect ratio.
-
-        If Z step is much larger than XY pixel size, and XY fits in texture
-        but physical Z extent is smaller, Z should be upsampled for correct display.
-        """
-        # Small volume that fits in texture, but with anisotropic voxels
-        xy_size = 1000
-        n_z = 20
-        pixel_size_xy = 0.325  # µm
-        pixel_size_z = 3.0  # µm (Z is ~9x coarser)
-
-        data = xr.DataArray(
-            np.random.randint(0, 65536, (n_z, xy_size, xy_size), dtype=np.uint16),
-            dims=["z", "y", "x"],
-            attrs={"pixel_size_um": pixel_size_xy, "dz_um": pixel_size_z},
-        )
-        wrapper = data_wrapper_class.create(data)
-
-        result = wrapper.isel({0: slice(None), 1: slice(None), 2: slice(None)})
-
-        # Physical dimensions
-        physical_xy = xy_size * pixel_size_xy  # 325 µm
-        physical_z = n_z * pixel_size_z  # 60 µm
-
-        # Z should be scaled to match physical proportions
-        # Expected Z output ≈ physical_z / pixel_size_xy = 60 / 0.325 ≈ 185 voxels
-        expected_z = physical_z / pixel_size_xy
-
-        # Allow 10% tolerance
-        assert abs(result.shape[0] - expected_z) / expected_z < 0.1, (
-            f"Z dimension {result.shape[0]} doesn't match expected {expected_z:.0f}"
-        )
-
-    def test_no_physical_sizes_fallback(self, data_wrapper_class):
-        """Test fallback behavior when physical sizes are not provided.
-
-        Without pixel_size_um and dz_um attrs, should use simple independent scaling.
-        """
-        large_size = MAX_3D_TEXTURE_SIZE + 500
-        n_z = 50
-
-        # No attrs - should fall back to simple scaling
-        data = xr.DataArray(
-            np.random.randint(0, 65536, (n_z, large_size, large_size), dtype=np.uint16),
-            dims=["z", "y", "x"],
-        )
-        wrapper = data_wrapper_class.create(data)
-
-        result = wrapper.isel({0: slice(None), 1: slice(None), 2: slice(None)})
-
-        # XY should be downsampled
+        # XY should be downsampled, Z unchanged (independent scaling)
         assert max(result.shape[-2:]) <= MAX_3D_TEXTURE_SIZE
-        # Z should remain unchanged (it's under the limit)
-        assert result.shape[0] == n_z
+        assert result.shape[0] == n_z  # Z not modified since under limit
