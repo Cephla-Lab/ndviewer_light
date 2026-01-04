@@ -93,19 +93,23 @@ try:
                 else:
                     z0, z1 = -0.5, shape[0] - 0.5
 
-                pos = np.array([
-                    [x0, y0, z0],
-                    [x1, y0, z0],
-                    [x0, y1, z0],
-                    [x1, y1, z0],
-                    [x0, y0, z1],
-                    [x1, y0, z1],
-                    [x0, y1, z1],
-                    [x1, y1, z1],
-                ], dtype=np.float32)
+                pos = np.array(
+                    [
+                        [x0, y0, z0],
+                        [x1, y0, z0],
+                        [x0, y1, z0],
+                        [x1, y1, z0],
+                        [x0, y0, z1],
+                        [x1, y0, z1],
+                        [x0, y1, z1],
+                        [x1, y1, z1],
+                    ],
+                    dtype=np.float32,
+                )
 
-                indices = np.array([2, 6, 0, 4, 5, 6, 7, 2, 3, 0, 1, 5, 3, 7],
-                                   dtype=np.uint32)
+                indices = np.array(
+                    [2, 6, 0, 4, 5, 6, 7, 2, 3, 0, 1, 5, 3, 7], dtype=np.uint32
+                )
 
                 self._vertices.set_data(pos)
                 self._index_buffer.set_data(indices)
@@ -133,7 +137,7 @@ try:
                             x=(0, data.shape[2]),
                             y=(0, data.shape[1]),
                             z=(0, z_size),
-                            margin=0.01
+                            margin=0.01,
                         )
                 return handle
 
@@ -490,14 +494,28 @@ def read_acquisition_parameters(
 
             if sensor_pixel is not None and nominal_mag is not None and nominal_mag > 0:
                 # Compute actual magnification with tube lens correction
-                if tube_lens is not None and obj_tube_lens is not None and obj_tube_lens > 0:
-                    actual_mag = float(nominal_mag) * (float(tube_lens) / float(obj_tube_lens))
+                if (
+                    tube_lens is not None
+                    and obj_tube_lens is not None
+                    and obj_tube_lens > 0
+                ):
+                    actual_mag = float(nominal_mag) * (
+                        float(tube_lens) / float(obj_tube_lens)
+                    )
                 else:
                     actual_mag = float(nominal_mag)
                 pixel_size = float(sensor_pixel) / actual_mag
 
         # Try common key names for z spacing
-        for key in ["dz_um", "dz", "z_step", "zStep", "z_spacing", "pixel_size_z", "dz(um)"]:
+        for key in [
+            "dz_um",
+            "dz",
+            "z_step",
+            "zStep",
+            "z_spacing",
+            "pixel_size_z",
+            "dz(um)",
+        ]:
             if key in params:
                 dz = float(params[key])
                 break

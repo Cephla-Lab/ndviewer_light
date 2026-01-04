@@ -5,6 +5,9 @@ Tests verify that the custom DataWrapper correctly:
 - Preserves full resolution for 2D slices
 - Handles multichannel data correctly
 - Leaves small volumes unchanged
+
+Note: These tests require NDV to be available. They are skipped in CI
+environments where NDV is not installed.
 """
 
 import numpy as np
@@ -12,7 +15,13 @@ import pytest
 import xarray as xr
 
 # Import from ndviewer_light to register the wrapper (side effect of import)
-from ndviewer_light import MAX_3D_TEXTURE_SIZE
+from ndviewer_light import MAX_3D_TEXTURE_SIZE, NDV_AVAILABLE
+
+# Skip all tests in this module if NDV is not available
+pytestmark = pytest.mark.skipif(
+    not NDV_AVAILABLE,
+    reason="NDV not available - downsampling wrapper not registered",
+)
 
 
 @pytest.fixture
