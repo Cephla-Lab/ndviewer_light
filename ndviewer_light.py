@@ -635,9 +635,9 @@ class LightweightViewer(QWidget):
                 channel_names.extend(f"Ch{i}" for i in range(len(channel_names), n_c))
             elif len(channel_names) > n_c:
                 channel_names = channel_names[:n_c]
-            # Keep coordinates numeric (indices) for the "channel" axis; channel names
-            # are stored in attrs and applied via _lut_controllers. Other axes also use
-            # numeric indices here since OME-TIFF dimensions map directly to array shape.
+            # Keep coordinates numeric (indices) for all axes, including "channel";
+            # channel names are stored in attrs and applied via _lut_controllers.
+            # This convention is used consistently for both OME-TIFF and single-TIFF paths.
             coords_base = {
                 axis_map.get(ax, f"ax_{ax}"): list(range(dim))
                 for ax, dim in zip(axes, shape)
@@ -878,6 +878,8 @@ class LightweightViewer(QWidget):
         # Check if _lut_controllers is available (indicates viewer is ready).
         # Note: _lut_controllers is a private API that may change in future ndv versions;
         # at the time of writing there is no stable public API for this behavior in ndv.
+        # If removed or renamed, this retry loop will timeout gracefully and channel
+        # labels will not be updated, falling back to numeric indices in the UI.
         controllers = getattr(self.ndv_viewer, "_lut_controllers", None)
         if controllers:
             self._update_channel_labels()
