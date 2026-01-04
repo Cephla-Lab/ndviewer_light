@@ -8,10 +8,13 @@ NOT run during CI - use for manual visual testing only.
 Usage:
     python tests/test_3d_visualization.py
 
-Note:
-    Test data is saved to a temporary directory (e.g., /tmp/ndv_3d_test_*).
-    These directories are NOT automatically cleaned up to allow inspection
-    after the viewer closes. Remove manually with: rm -rf /tmp/ndv_3d_test_*
+Cleanup:
+    Test data is saved to a temporary directory (e.g., /tmp/ndv_3d_test_*)
+    and kept after the viewer closes to allow inspection.
+
+    To clean up old test directories:
+        rm -rf /tmp/ndv_3d_test_*              # remove all
+        find /tmp -maxdepth 1 -type d -name 'ndv_3d_test_*' -mtime +7 -exec rm -rf {} +  # remove >7 days old
 """
 
 import numpy as np
@@ -78,10 +81,10 @@ def generate_3d_test_volume(
         volume += helix_signal
 
     # 3. Add a vertical hollow tube (like a blood vessel)
-    for zi in range(nz):
-        dist_to_axis = np.sqrt((X[:, :, zi] - 15) ** 2 + (Y[:, :, zi] - 85) ** 2)
-        tube_signal = 0.5 * np.exp(-0.5 * ((dist_to_axis - 8) / 2) ** 2)
-        volume[:, :, zi] += tube_signal
+    # Use physical coordinates for consistency with spheres and helix
+    dist_to_axis = np.sqrt((X - 15) ** 2 + (Y - 85) ** 2)
+    tube_signal = 0.5 * np.exp(-0.5 * ((dist_to_axis - 8) / 2) ** 2)
+    volume += tube_signal
 
     # Transpose to (z, y, x) for saving
     volume = volume.transpose(2, 1, 0)

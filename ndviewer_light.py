@@ -76,6 +76,7 @@ try:
 
         if not getattr(VolumeVisual, "_voxel_scale_patch", False):
             _orig_init = VolumeVisual.__init__
+            _orig_create_vertex_data = VolumeVisual._create_vertex_data
 
             def _patched_init(self, *args, **kwargs):
                 """Initialize VolumeVisual and capture the current voxel scale.
@@ -97,20 +98,23 @@ try:
                 Uses the instance's _voxel_scale attribute (set at construction)
                 rather than the global to ensure correct scaling even when
                 multiple volumes exist with different scales.
+
+                Falls back to original implementation when no scale is set.
                 """
+                # If no scale set, use original implementation
+                scale = getattr(self, "_voxel_scale", None)
+                if scale is None:
+                    return _orig_create_vertex_data(self)
+
                 shape = self._vol_shape
 
                 # Get corner coordinates with Z scaling
                 x0, x1 = -0.5, shape[2] - 0.5
                 y0, y1 = -0.5, shape[1] - 0.5
 
-                # Apply Z scale from instance attribute (set at construction)
-                scale = getattr(self, "_voxel_scale", None)
-                if scale is not None:
-                    sz = scale[2]
-                    z0, z1 = -0.5 * sz, (shape[0] - 0.5) * sz
-                else:
-                    z0, z1 = -0.5, shape[0] - 0.5
+                # Apply Z scale from instance attribute
+                sz = scale[2]
+                z0, z1 = -0.5 * sz, (shape[0] - 0.5) * sz
 
                 pos = np.array(
                     [
@@ -146,17 +150,26 @@ try:
                 handle = _orig_add_volume(self, data)
                 # Update camera to account for scaled Z dimension
                 if _current_voxel_scale is not None and data is not None:
-                    sz = _current_voxel_scale[2]
-                    if abs(sz - 1.0) > 0.01:
-                        z_size = data.shape[0] * sz
-                        max_size = max(data.shape[1], data.shape[2], z_size)
-                        # Add margin to scale_factor for comfortable viewing distance
-                        self._camera.scale_factor = max_size + 6
-                        self._view.camera.set_range(
-                            x=(0, data.shape[2]),
-                            y=(0, data.shape[1]),
-                            z=(0, z_size),
-                            margin=0.01,
+                    # Ensure data has at least 3 dimensions
+                    shape = getattr(data, "shape", None)
+                    if shape is None or len(shape) < 3:
+                        return handle
+                    try:
+                        sz = _current_voxel_scale[2]
+                        if abs(sz - 1.0) > 0.01:
+                            z_size = shape[0] * sz
+                            max_size = max(shape[1], shape[2], z_size)
+                            # Add margin to scale_factor for comfortable viewing distance
+                            self._camera.scale_factor = max_size + 6
+                            self._view.camera.set_range(
+                                x=(0, shape[2]),
+                                y=(0, shape[1]),
+                                z=(0, z_size),
+                                margin=0.01,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to adjust camera for anisotropic voxels: %s", e
                         )
                 return handle
 
@@ -427,10 +440,8 @@ def extract_ome_physical_sizes(
             if ns:
                 pixels = root.find(".//ome:Pixels", ns)
             else:
-                # Try without namespace
+                # Try without or with any namespace (.//{*} matches any namespace)
                 pixels = root.find(".//{*}Pixels")
-                if pixels is None:
-                    pixels = root.find(".//Pixels")
 
             if pixels is not None:
                 size_x = pixels.get("PhysicalSizeX")
@@ -510,7 +521,7 @@ def read_acquisition_parameters(
                     continue
                 # Sanity check: typical microscopy pixel sizes are 0.1-10 µm
                 # Range 0.01-100 µm covers most use cases including low-mag imaging
-                if 0.01 < candidate_pixel < 100:
+                if 0.01 < candidate_pixel <= 100:
                     pixel_size = candidate_pixel
                     break
 
@@ -542,7 +553,7 @@ def read_acquisition_parameters(
                 computed = float(sensor_pixel) / actual_mag
                 # Sanity check: typical microscopy pixel sizes are 0.1-10 µm
                 # Range 0.01-100 µm covers most use cases including low-mag imaging
-                if 0.01 < computed < 100:
+                if 0.01 < computed <= 100:
                     pixel_size = computed
 
         # Try common key names for z spacing
@@ -618,7 +629,7 @@ def read_tiff_pixel_size(tiff_path: str) -> Optional[float]:
                                 continue
                             # Sanity check: typical microscopy pixel sizes are 0.1-10 µm
                             # Range 0.01-100 µm covers most use cases including low-mag imaging
-                            if 0.01 < val < 100:
+                            if 0.01 < val <= 100:
                                 return val
                 except (json.JSONDecodeError, ValueError, TypeError):
                     # JSON parsing failed; fall through to resolution tags below
@@ -655,7 +666,7 @@ def read_tiff_pixel_size(tiff_path: str) -> Optional[float]:
 
                 # Sanity check: typical microscopy pixel sizes are 0.1-10 µm
                 # Range 0.01-100 µm covers most use cases including low-mag imaging
-                if 0.01 < pixel_size_um < 100:
+                if 0.01 < pixel_size_um <= 100:
                     return pixel_size_um
 
     except Exception as e:

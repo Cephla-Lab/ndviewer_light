@@ -133,6 +133,38 @@ class TestExtractOmePhysicalSizes:
         assert py is None
         assert pz is None
 
+    def test_negative_and_zero_physical_sizes(self):
+        """Test that negative and zero physical sizes are rejected."""
+        # Test negative value
+        ome_xml_negative = """<?xml version="1.0" encoding="UTF-8"?>
+        <OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">
+            <Image ID="Image:0">
+                <Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="uint16"
+                        SizeX="1024" SizeY="1024" SizeZ="50" SizeC="1" SizeT="1"
+                        PhysicalSizeX="-0.325" PhysicalSizeY="0.325" PhysicalSizeZ="1.5">
+                </Pixels>
+            </Image>
+        </OME>"""
+        px, py, pz = extract_ome_physical_sizes(ome_xml_negative)
+        assert px is None  # Negative value rejected
+        assert py == pytest.approx(0.325)
+        assert pz == pytest.approx(1.5)
+
+        # Test zero value
+        ome_xml_zero = """<?xml version="1.0" encoding="UTF-8"?>
+        <OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">
+            <Image ID="Image:0">
+                <Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="uint16"
+                        SizeX="1024" SizeY="1024" SizeZ="50" SizeC="1" SizeT="1"
+                        PhysicalSizeX="0.325" PhysicalSizeY="0" PhysicalSizeZ="1.5">
+                </Pixels>
+            </Image>
+        </OME>"""
+        px, py, pz = extract_ome_physical_sizes(ome_xml_zero)
+        assert px == pytest.approx(0.325)
+        assert py is None  # Zero value rejected
+        assert pz == pytest.approx(1.5)
+
 
 class TestReadAcquisitionParameters:
     """Test suite for acquisition_parameters.json reading."""
