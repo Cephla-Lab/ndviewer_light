@@ -100,7 +100,7 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
         # Class-level cache for OpenGL texture limit (queried once, shared by all instances)
         _cached_max_texture_size: Optional[int] = None
 
-        def __init__(self, data: "xr.DataArray"):
+        def __init__(self, data: xr.DataArray):
             super().__init__(data)
 
         @classmethod
