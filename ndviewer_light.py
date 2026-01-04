@@ -274,6 +274,7 @@ class LightweightViewer(QWidget):
         self._last_sig = None
         self._refresh_timer = None
         self._channel_label_generation = 0  # Generation counter for retry cancellation
+        self._pending_channel_label_retries = 0  # Retry counter for channel label updates
         self._setup_ui()
         self.load_dataset(dataset_path)
         self._setup_live_refresh()
@@ -739,8 +740,8 @@ class LightweightViewer(QWidget):
 
             times = sorted(t_set)
             z_levels = sorted(z_set)
-            channels = sorted(c_set)
-            n_t, n_fov, n_z, n_c = len(times), len(fovs), len(z_levels), len(channels)
+            channel_names = sorted(c_set)
+            n_t, n_fov, n_z, n_c = len(times), len(fovs), len(z_levels), len(channel_names)
 
             sample = next(
                 (
@@ -761,7 +762,7 @@ class LightweightViewer(QWidget):
 
             luts = {
                 i: wavelength_to_colormap(extract_wavelength(c))
-                for i, c in enumerate(channels)
+                for i, c in enumerate(channel_names)
             }
 
             @lru_cache(maxsize=128)
@@ -794,7 +795,7 @@ class LightweightViewer(QWidget):
                 t = times[t_idx]
                 region, fov = fovs[f_idx]["region"], fovs[f_idx]["fov"]
                 z = z_levels[z_idx]
-                channel = channels[c_idx]
+                channel = channel_names[c_idx]
                 plane = load_plane(t, region, fov, z, channel)
                 return plane.reshape(1, 1, 1, 1, height, width)
 
@@ -818,7 +819,7 @@ class LightweightViewer(QWidget):
                 },
             )
             xarr.attrs["luts"] = luts
-            xarr.attrs["channel_names"] = channels
+            xarr.attrs["channel_names"] = channel_names
             return xarr
         except Exception as e:
             print(f"Single-TIFF load error: {e}")
