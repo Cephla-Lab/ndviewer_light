@@ -626,11 +626,16 @@ class LightweightViewer(QWidget):
 
             axis_map = {"T": "time", "Z": "z_level", "C": "channel", "Y": "y", "X": "x"}
             dims_base = [axis_map.get(ax, f"ax_{ax}") for ax in axes]
-            # Build channel name list - use extracted names or generate fallback
-            if not channel_names or len(channel_names) != n_c:
+            # Build channel name list - prefer extracted names, fill/truncate to match n_c
+            if not channel_names:
                 channel_names = [f"Ch{i}" for i in range(n_c)]
-            # Keep coordinates numeric (indices) for all axes, including "channel".
-            # Channel names are stored separately in attrs and applied via _lut_controllers.
+            elif len(channel_names) < n_c:
+                channel_names.extend(f"Ch{i}" for i in range(len(channel_names), n_c))
+            elif len(channel_names) > n_c:
+                channel_names = channel_names[:n_c]
+            # Keep coordinates numeric (indices) for the "channel" axis; channel names
+            # are stored in attrs and applied via _lut_controllers. Other axes also use
+            # numeric indices here since OME-TIFF dimensions map directly to array shape.
             coords_base = {
                 axis_map.get(ax, f"ax_{ax}"): list(range(dim))
                 for ax, dim in zip(axes, shape)
@@ -802,8 +807,8 @@ class LightweightViewer(QWidget):
             xarr = xr.DataArray(
                 stacked,
                 dims=["time", "fov", "z_level", "channel", "y", "x"],
-                # Keep coordinates numeric (indices) for all axes, including "channel".
-                # Channel names are stored separately in attrs and applied via _lut_controllers.
+                # Use actual values for time/z_level coords, numeric indices for fov/channel.
+                # Channel names are stored in attrs and applied via _lut_controllers.
                 coords={
                     "time": times,
                     "fov": list(range(n_fov)),
