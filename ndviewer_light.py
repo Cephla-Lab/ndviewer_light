@@ -75,20 +75,39 @@ try:
         from vispy.visuals.volume import VolumeVisual
 
         if not getattr(VolumeVisual, "_voxel_scale_patch", False):
-            _orig_create_vertex_data = VolumeVisual._create_vertex_data
+            _orig_init = VolumeVisual.__init__
+
+            def _patched_init(self, *args, **kwargs):
+                """Initialize VolumeVisual and capture the current voxel scale.
+
+                Storing the scale as an instance attribute ensures thread safety
+                when multiple volumes are created concurrently - each volume
+                captures the scale that was active at its construction time.
+                """
+                _orig_init(self, *args, **kwargs)
+                # Capture the voxel scale active at construction time
+                global _current_voxel_scale
+                self._voxel_scale = _current_voxel_scale
+
+            VolumeVisual.__init__ = _patched_init
 
             def _patched_create_vertex_data(self):
-                """Create vertices with Z scaling for anisotropic voxels."""
-                global _current_voxel_scale
+                """Create vertices with Z scaling for anisotropic voxels.
+
+                Uses the instance's _voxel_scale attribute (set at construction)
+                rather than the global to ensure correct scaling even when
+                multiple volumes exist with different scales.
+                """
                 shape = self._vol_shape
 
                 # Get corner coordinates with Z scaling
                 x0, x1 = -0.5, shape[2] - 0.5
                 y0, y1 = -0.5, shape[1] - 0.5
 
-                # Apply Z scale if set
-                if _current_voxel_scale is not None:
-                    sz = _current_voxel_scale[2]
+                # Apply Z scale from instance attribute (set at construction)
+                scale = getattr(self, "_voxel_scale", None)
+                if scale is not None:
+                    sz = scale[2]
                     z0, z1 = -0.5 * sz, (shape[0] - 0.5) * sz
                 else:
                     z0, z1 = -0.5, shape[0] - 0.5
@@ -115,8 +134,9 @@ try:
                 self._index_buffer.set_data(indices)
 
             VolumeVisual._create_vertex_data = _patched_create_vertex_data
+            VolumeVisual.__init__ = _patched_init
             VolumeVisual._voxel_scale_patch = True
-            logger.info("Voxel scale patch applied to VolumeVisual._create_vertex_data")
+            logger.info("Voxel scale patch applied to VolumeVisual")
 
         # Also patch add_volume to update camera range
         if not getattr(VispyArrayCanvas, "_camera_scale_patch", False):
@@ -563,9 +583,15 @@ def read_tiff_pixel_size(tiff_path: str) -> Optional[float]:
                     ]:
                         if key in metadata:
                             val = float(metadata[key])
-                            if 0.01 < val < 100:  # Sanity check
+                            # Require strictly positive value
+                            if val <= 0:
+                                continue
+                            # Sanity check: typical microscopy pixel sizes are 0.1-10 µm
+                            # Range 0.01-100 µm covers most use cases including low-mag imaging
+                            if 0.01 < val < 100:
                                 return val
                 except (json.JSONDecodeError, ValueError, TypeError):
+                    # JSON parsing failed; fall through to resolution tags below
                     pass
 
             # Try XResolution/YResolution tags with proper unit
@@ -585,21 +611,22 @@ def read_tiff_pixel_size(tiff_path: str) -> Optional[float]:
                 else:
                     pixels_per_unit = float(x_res_value)
 
-                # Skip default value (1, 1)
+                # Skip default/invalid values (must be > 1 to be meaningful)
                 if pixels_per_unit <= 1:
                     return None
 
-                if pixels_per_unit > 0:
-                    if unit_value == 2:  # inch
-                        # pixels/inch -> um/pixel: 25400 um/inch / pixels_per_inch
-                        pixel_size_um = 25400.0 / pixels_per_unit
-                    else:  # centimeter (unit_value == 3)
-                        # pixels/cm -> um/pixel: 10000 um/cm / pixels_per_cm
-                        pixel_size_um = 10000.0 / pixels_per_unit
+                # Convert to micrometers based on unit
+                if unit_value == 2:  # inch
+                    # pixels/inch -> um/pixel: 25400 um/inch / pixels_per_inch
+                    pixel_size_um = 25400.0 / pixels_per_unit
+                else:  # centimeter (unit_value == 3)
+                    # pixels/cm -> um/pixel: 10000 um/cm / pixels_per_cm
+                    pixel_size_um = 10000.0 / pixels_per_unit
 
-                    if 0.01 < pixel_size_um < 100:
-                        # Sanity check: typical microscopy pixel sizes are 0.1-10 um
-                        return pixel_size_um
+                # Sanity check: typical microscopy pixel sizes are 0.1-10 µm
+                # Range 0.01-100 µm covers most use cases including low-mag imaging
+                if 0.01 < pixel_size_um < 100:
+                    return pixel_size_um
 
     except Exception as e:
         logger.debug("Failed to read pixel size from TIFF tags: %s", e)

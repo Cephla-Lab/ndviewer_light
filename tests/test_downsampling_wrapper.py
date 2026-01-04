@@ -292,7 +292,9 @@ class TestDownsampling3DXarrayWrapper:
         """Test that pixel size attrs are preserved through the wrapper.
 
         Physical pixel sizes (pixel_size_um, dz_um) are stored in attrs for
-        reference but don't affect downsampling (NDV assumes isotropic voxels).
+        reference and do not affect the numerical downsampling, which operates
+        in index space; voxel scaling for display is handled separately via
+        the vispy VolumeVisual patch in ndviewer_light.py.
         """
         large_size = MAX_3D_TEXTURE_SIZE + 500
         n_z = 50
