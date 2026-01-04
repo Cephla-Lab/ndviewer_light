@@ -1087,9 +1087,9 @@ class LightweightViewer(QWidget):
                         # label is displayed in the LUT controls.
                         controller.synchronize()
                     else:
-                        logger.debug(
+                        logger.warning(
                             "LUT controller at index %d has no 'synchronize' method; "
-                            "channel label '%s' set but not synchronized",
+                            "channel label '%s' may not appear in UI",
                             i,
                             name,
                         )
