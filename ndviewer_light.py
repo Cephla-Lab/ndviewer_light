@@ -152,8 +152,9 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
             within OpenGL texture limits.
 
             Downsampling strategy:
-            - z: scaled independently only if z exceeds the texture limit
-            - x/y: scaled uniformly (same factor) to preserve aspect ratio
+            - If physical pixel sizes are known (pixel_size_um, dz_um in attrs),
+              scale to maintain correct physical aspect ratio
+            - Otherwise: z scaled independently, x/y scaled uniformly
             - channel/time/fov: never scaled
             """
             # Get the data using parent's implementation
@@ -180,10 +181,6 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
             # Check if any spatial dimension exceeds the texture limit
             max_texture_size = self._get_max_texture_size()
 
-            # Build per-dimension scale factors (only for dimensions in output data)
-            # - z: scaled independently (if it exceeds limit)
-            # - x/y: use same scale factor to preserve aspect ratio
-
             # First pass: find dimensions and their sizes in output data
             dim_info = []  # [(dim_name, size), ...]
             for i, dim in enumerate(dims):
@@ -192,27 +189,20 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
                     continue  # Dropped dimension
                 dim_info.append((str(dim).lower(), data.shape[len(dim_info)]))
 
-            # Calculate xy scale factor (uniform for x and y to preserve aspect ratio)
-            xy_sizes = [size for name, size in dim_info if name in {"y", "x"}]
-            xy_max = max(xy_sizes) if xy_sizes else 0
-            xy_scale = max_texture_size / xy_max if xy_max > max_texture_size else 1.0
+            # Get physical pixel sizes from attrs (if available)
+            pixel_size_xy = self._data.attrs.get("pixel_size_um")
+            pixel_size_z = self._data.attrs.get("dz_um")
 
-            # Build zoom factors
-            zoom_factors = []
-            needs_downsampling = False
-            for dim_name, dim_size in dim_info:
-                if dim_name in {"y", "x"}:
-                    # Use uniform xy scale to preserve aspect ratio
-                    zoom_factors.append(xy_scale)
-                    if xy_scale < 1.0:
-                        needs_downsampling = True
-                elif dim_name in spatial_z_names and dim_size > max_texture_size:
-                    # z scaled independently
-                    z_scale = max_texture_size / dim_size
-                    zoom_factors.append(z_scale)
-                    needs_downsampling = True
-                else:
-                    zoom_factors.append(1.0)
+            # Check if we have physical scale info for aspect-ratio-aware downsampling
+            if pixel_size_xy is not None and pixel_size_z is not None:
+                zoom_factors, needs_downsampling = self._compute_physical_zoom_factors(
+                    dim_info, max_texture_size, pixel_size_xy, pixel_size_z
+                )
+            else:
+                # Fallback: independent scaling without physical aspect ratio
+                zoom_factors, needs_downsampling = self._compute_simple_zoom_factors(
+                    dim_info, max_texture_size, spatial_z_names
+                )
 
             if needs_downsampling:
                 logger.info(
@@ -229,6 +219,120 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
                     return data
 
             return data
+
+        def _compute_physical_zoom_factors(
+            self,
+            dim_info: list,
+            max_texture_size: int,
+            pixel_size_xy: float,
+            pixel_size_z: float,
+        ) -> tuple:
+            """Compute zoom factors that preserve physical aspect ratio.
+
+            When physical pixel sizes are known, we scale all dimensions uniformly
+            in physical space to maintain correct aspect ratio in 3D rendering.
+            """
+            spatial_z_names = {"z", "z_level", "depth", "focus"}
+
+            # Compute physical dimensions
+            physical_dims = {}
+            for dim_name, dim_size in dim_info:
+                if dim_name in {"y", "x"}:
+                    physical_dims[dim_name] = dim_size * pixel_size_xy
+                elif dim_name in spatial_z_names:
+                    physical_dims[dim_name] = dim_size * pixel_size_z
+
+            # Find the limiting dimension in physical space
+            # We need all output dimensions <= max_texture_size
+            # Scale uniformly in physical space to maintain aspect ratio
+            max_physical = max(physical_dims.values()) if physical_dims else 0
+
+            if max_physical == 0:
+                return [1.0] * len(dim_info), False
+
+            # Compute required scale in physical space
+            # After scaling, output voxel count = physical_size / output_voxel_size
+            # We want max output voxel count <= max_texture_size
+
+            # Try using XY pixel size as output voxel size (common case)
+            # Output counts would be: physical_dim / pixel_size_xy
+            output_sizes = {}
+            for dim_name, phys_size in physical_dims.items():
+                # Use XY pixel size as reference for isotropic output
+                output_sizes[dim_name] = phys_size / pixel_size_xy
+
+            max_output = max(output_sizes.values()) if output_sizes else 0
+
+            if max_output <= max_texture_size:
+                # No downsampling needed, but may need to resample Z for aspect ratio
+                zoom_factors = []
+                needs_resampling = False
+                for dim_name, dim_size in dim_info:
+                    if dim_name in spatial_z_names:
+                        # Resample Z to have correct aspect ratio
+                        target_z = output_sizes.get(dim_name, dim_size)
+                        z_factor = target_z / dim_size
+                        zoom_factors.append(z_factor)
+                        if abs(z_factor - 1.0) > 0.01:
+                            needs_resampling = True
+                    else:
+                        zoom_factors.append(1.0)
+                return zoom_factors, needs_resampling
+
+            # Need to downsample - compute uniform physical scale
+            physical_scale = max_texture_size / max_output
+
+            # Compute zoom factors for each dimension
+            zoom_factors = []
+            needs_downsampling = False
+            for dim_name, dim_size in dim_info:
+                if dim_name in {"y", "x"}:
+                    # XY: apply physical scale
+                    factor = physical_scale
+                    zoom_factors.append(factor)
+                    if factor < 1.0:
+                        needs_downsampling = True
+                elif dim_name in spatial_z_names:
+                    # Z: compute target size preserving aspect ratio
+                    target_z = output_sizes.get(dim_name, dim_size) * physical_scale
+                    factor = target_z / dim_size
+                    zoom_factors.append(factor)
+                    if factor < 1.0:
+                        needs_downsampling = True
+                else:
+                    zoom_factors.append(1.0)
+
+            return zoom_factors, needs_downsampling
+
+        def _compute_simple_zoom_factors(
+            self, dim_info: list, max_texture_size: int, spatial_z_names: set
+        ) -> tuple:
+            """Compute zoom factors without physical aspect ratio info.
+
+            Falls back to independent scaling: XY scaled uniformly, Z scaled
+            independently only if it exceeds the texture limit.
+            """
+            # Calculate xy scale factor (uniform for x and y to preserve XY aspect)
+            xy_sizes = [size for name, size in dim_info if name in {"y", "x"}]
+            xy_max = max(xy_sizes) if xy_sizes else 0
+            xy_scale = max_texture_size / xy_max if xy_max > max_texture_size else 1.0
+
+            # Build zoom factors
+            zoom_factors = []
+            needs_downsampling = False
+            for dim_name, dim_size in dim_info:
+                if dim_name in {"y", "x"}:
+                    zoom_factors.append(xy_scale)
+                    if xy_scale < 1.0:
+                        needs_downsampling = True
+                elif dim_name in spatial_z_names and dim_size > max_texture_size:
+                    z_scale = max_texture_size / dim_size
+                    zoom_factors.append(z_scale)
+                    needs_downsampling = True
+                else:
+                    zoom_factors.append(1.0)
+
+            return zoom_factors, needs_downsampling
 
 
 # Filename patterns (from common.py)
