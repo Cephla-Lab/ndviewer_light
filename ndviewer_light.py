@@ -504,8 +504,15 @@ def read_acquisition_parameters(
         # Try direct pixel size keys first
         for key in ["pixel_size_um", "pixel_size", "pixelSize", "pixel_size_xy"]:
             if key in params:
-                pixel_size = float(params[key])
-                break
+                try:
+                    candidate_pixel = float(params[key])
+                except (TypeError, ValueError):
+                    continue
+                # Sanity check: typical microscopy pixel sizes are 0.1-10 µm
+                # Range 0.01-100 µm covers most use cases including low-mag imaging
+                if 0.01 < candidate_pixel < 100:
+                    pixel_size = candidate_pixel
+                    break
 
         # If not found, compute from sensor pixel size and magnification
         # Account for tube lens ratio: actual_mag = nominal_mag × (tube_lens / obj_tube_lens)
