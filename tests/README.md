@@ -4,6 +4,11 @@ This directory contains unit tests for the ndviewer_light application.
 
 ## Running Tests
 
+Ensure pytest is installed in your environment:
+```bash
+pip install pytest
+```
+
 Run all tests:
 ```bash
 pytest tests/

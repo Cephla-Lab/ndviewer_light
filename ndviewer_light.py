@@ -872,7 +872,7 @@ class LightweightViewer(QWidget):
 
         remaining = getattr(self, "_pending_channel_label_retries", 0)
         if remaining <= 0:
-            logger.debug("Channel label update timed out after retries")
+            logger.warning("Channel label update timed out - labels may show numeric indices")
             return
 
         # Check if _lut_controllers is available (indicates viewer is ready).

@@ -7,7 +7,6 @@ Tests cover:
 3. Retry mechanism for channel label updates with generation counter
 """
 
-import pytest
 import xml.etree.ElementTree as ET
 
 
@@ -111,7 +110,7 @@ class TestOMETiffChannelNamesLogic:
                     if name:
                         channel_names.append(name)
         except Exception:
-            pass
+            pass  # Parsing errors fall through to empty channel_names
 
         assert channel_names == provided_names
 
@@ -131,7 +130,7 @@ class TestOMETiffChannelNamesLogic:
                     if name:
                         channel_names.append(name)
         except Exception:
-            pass
+            pass  # Invalid XML expected - testing fallback behavior
 
         # Apply fallback logic
         if not channel_names:
@@ -150,8 +149,8 @@ class TestOMETiffChannelNamesLogic:
         ch1 = ET.SubElement(pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel")
         ch1.set("Name", "DAPI")
 
-        ch2 = ET.SubElement(pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel")
-        # No Name attribute
+        # Channel without Name attribute (intentionally unnamed)
+        ET.SubElement(pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel")
 
         ch3 = ET.SubElement(pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel")
         ch3.set("Name", "GFP")
@@ -169,7 +168,7 @@ class TestOMETiffChannelNamesLogic:
                     if name:  # Only append if name is not empty
                         channel_names.append(name)
         except Exception:
-            pass
+            pass  # Parsing errors fall through to partial channel_names
 
         # Only channels with names should be included
         assert channel_names == ["DAPI", "GFP"]
@@ -239,9 +238,7 @@ class TestChannelLabelRetryMechanism:
     def test_pending_retries_reset(self):
         """Pending retries should be reset to 20 on each update."""
         # Simulate the retry counter logic from _set_ndv_data (line 861)
-        pending_retries = 5  # Some old value
-
-        # On new update, reset to 20
+        # On each new update, pending_retries is always set to 20
         pending_retries = 20
 
         assert pending_retries == 20
