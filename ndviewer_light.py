@@ -81,6 +81,10 @@ except ImportError:
 # OpenGL 3D texture size limit (conservative estimate for most GPUs)
 MAX_3D_TEXTURE_SIZE = 2048
 
+# Channel label update retry configuration
+CHANNEL_LABEL_UPDATE_MAX_RETRIES = 20
+CHANNEL_LABEL_UPDATE_RETRY_DELAY_MS = 100
+
 # Register custom DataWrapper for automatic 3D downsampling
 if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
     from ndv.models._data_wrapper import XarrayWrapper
@@ -648,10 +652,8 @@ class LightweightViewer(QWidget):
 
         # Prefer in-place update to avoid visible refresh.
         if self._try_inplace_ndv_update(data):
-            # Update channel labels for the new data (same as in _set_ndv_data)
-            self._channel_label_generation += 1
-            self._pending_channel_label_retries = 20
-            self._schedule_channel_label_update(self._channel_label_generation)
+            # Update channel labels for the new data
+            self._initiate_channel_label_update()
             # Close old handles after successful swap.
             for h in old_handles or []:
                 try:
@@ -1023,10 +1025,16 @@ class LightweightViewer(QWidget):
         layout.insertWidget(idx, self.ndv_viewer.widget(), 1)
 
         # Update channel labels after viewer is ready.
-        # Use retry mechanism instead of fixed delay since NDV initialization timing varies.
-        # Increment generation to cancel any pending retries from previous loads.
+        self._initiate_channel_label_update()
+
+    def _initiate_channel_label_update(self):
+        """Start the channel label update retry mechanism.
+
+        Increments generation to cancel any pending retries from previous loads,
+        then schedules retry attempts until NDV viewer is ready.
+        """
         self._channel_label_generation += 1
-        self._pending_channel_label_retries = 20
+        self._pending_channel_label_retries = CHANNEL_LABEL_UPDATE_MAX_RETRIES
         self._schedule_channel_label_update(self._channel_label_generation)
 
     def _schedule_channel_label_update(self, generation: int):
@@ -1057,7 +1065,10 @@ class LightweightViewer(QWidget):
 
         # Not ready yet; schedule another check
         self._pending_channel_label_retries = remaining - 1
-        QTimer.singleShot(100, lambda: self._schedule_channel_label_update(generation))
+        QTimer.singleShot(
+            CHANNEL_LABEL_UPDATE_RETRY_DELAY_MS,
+            lambda: self._schedule_channel_label_update(generation),
+        )
 
     def _update_channel_labels(self):
         """Manually update channel labels in the NDV viewer.
