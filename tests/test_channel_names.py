@@ -14,17 +14,20 @@ import xml.etree.ElementTree as ET
 def create_ome_metadata(channel_names):
     """Create OME-TIFF metadata XML with channel names."""
     root = ET.Element("{http://www.openmicroscopy.org/Schemas/OME/2016-06}OME")
-    image = ET.SubElement(root, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Image")
-    pixels = ET.SubElement(image, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Pixels")
+    image = ET.SubElement(
+        root, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Image"
+    )
+    pixels = ET.SubElement(
+        image, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Pixels"
+    )
 
     for name in channel_names:
         channel_elem = ET.SubElement(
-            pixels,
-            "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel"
+            pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel"
         )
         channel_elem.set("Name", name)
 
-    return ET.tostring(root, encoding='unicode')
+    return ET.tostring(root, encoding="unicode")
 
 
 class TestOMETiffChannelNamesLogic:
@@ -142,20 +145,30 @@ class TestOMETiffChannelNamesLogic:
         """Test handling of channels with empty or missing Name attributes."""
         # Create XML with one channel missing Name attribute
         root = ET.Element("{http://www.openmicroscopy.org/Schemas/OME/2016-06}OME")
-        image = ET.SubElement(root, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Image")
-        pixels = ET.SubElement(image, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Pixels")
+        image = ET.SubElement(
+            root, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Image"
+        )
+        pixels = ET.SubElement(
+            image, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Pixels"
+        )
 
         # Add channels with various attributes
-        ch1 = ET.SubElement(pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel")
+        ch1 = ET.SubElement(
+            pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel"
+        )
         ch1.set("Name", "DAPI")
 
         # Channel without Name attribute (intentionally unnamed)
-        ET.SubElement(pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel")
+        ET.SubElement(
+            pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel"
+        )
 
-        ch3 = ET.SubElement(pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel")
+        ch3 = ET.SubElement(
+            pixels, "{http://www.openmicroscopy.org/Schemas/OME/2016-06}Channel"
+        )
         ch3.set("Name", "GFP")
 
-        ome_metadata = ET.tostring(root, encoding='unicode')
+        ome_metadata = ET.tostring(root, encoding="unicode")
 
         # Parse channel names
         channel_names = []
@@ -206,10 +219,7 @@ class TestSingleTiffChannelNamesLogic:
         channel_names = ["DAPI", "GFP", "RFP"]
 
         # Simulate creating xarray attrs
-        attrs = {
-            "luts": {},
-            "channel_names": channel_names
-        }
+        attrs = {"luts": {}, "channel_names": channel_names}
 
         assert attrs["channel_names"] == channel_names
         assert len(attrs["channel_names"]) == 3
@@ -250,7 +260,7 @@ class TestChannelLabelRetryMechanism:
         callback_generation = 3
 
         # Check if callback is stale
-        is_stale = (current_generation != callback_generation)
+        is_stale = current_generation != callback_generation
 
         assert is_stale is True
 
@@ -260,7 +270,7 @@ class TestChannelLabelRetryMechanism:
         callback_generation = 5
 
         # Check if callback is stale
-        is_stale = (current_generation != callback_generation)
+        is_stale = current_generation != callback_generation
 
         assert is_stale is False
 
@@ -279,7 +289,7 @@ class TestChannelLabelRetryMechanism:
         # Simulate timeout detection (line 874)
         remaining = 0
 
-        should_timeout = (remaining <= 0)
+        should_timeout = remaining <= 0
 
         assert should_timeout is True
 
@@ -287,8 +297,8 @@ class TestChannelLabelRetryMechanism:
         """Should continue retrying while retries remain."""
         remaining = 5
 
-        should_timeout = (remaining <= 0)
-        should_continue = (remaining > 0)
+        should_timeout = remaining <= 0
+        should_continue = remaining > 0
 
         assert should_timeout is False
         assert should_continue is True

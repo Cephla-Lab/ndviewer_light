@@ -426,7 +426,9 @@ class LightweightViewer(QWidget):
         self._last_sig = None
         self._refresh_timer = None
         self._channel_label_generation = 0  # Generation counter for retry cancellation
-        self._pending_channel_label_retries = 0  # Retry counter for channel label updates
+        self._pending_channel_label_retries = (
+            0  # Retry counter for channel label updates
+        )
         self._setup_ui()
         self.load_dataset(dataset_path)
         self._setup_live_refresh()
@@ -900,7 +902,12 @@ class LightweightViewer(QWidget):
             times = sorted(t_set)
             z_levels = sorted(z_set)
             channel_names = sorted(c_set)
-            n_t, n_fov, n_z, n_c = len(times), len(fovs), len(z_levels), len(channel_names)
+            n_t, n_fov, n_z, n_c = (
+                len(times),
+                len(fovs),
+                len(z_levels),
+                len(channel_names),
+            )
 
             sample = next(
                 (
@@ -1033,7 +1040,9 @@ class LightweightViewer(QWidget):
 
         remaining = self._pending_channel_label_retries
         if remaining <= 0:
-            logger.warning("Channel label update timed out - labels may show numeric indices")
+            logger.warning(
+                "Channel label update timed out - labels may show numeric indices"
+            )
             return
 
         # Check if _lut_controllers is available (indicates viewer is ready).
@@ -1085,7 +1094,9 @@ class LightweightViewer(QWidget):
                             name,
                         )
                     updated_names.append(name)
-            logger.debug("Updated %d channel labels: %s", len(updated_names), updated_names)
+            logger.debug(
+                "Updated %d channel labels: %s", len(updated_names), updated_names
+            )
         except Exception as e:
             logger.debug("Failed to update channel labels: %s", e)
 
