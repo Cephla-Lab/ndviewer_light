@@ -646,6 +646,10 @@ class LightweightViewer(QWidget):
 
         # Prefer in-place update to avoid visible refresh.
         if self._try_inplace_ndv_update(data):
+            # Update channel labels for the new data (same as in _set_ndv_data)
+            self._channel_label_generation += 1
+            self._pending_channel_label_retries = 20
+            self._schedule_channel_label_update(self._channel_label_generation)
             # Close old handles after successful swap.
             for h in old_handles or []:
                 try:
