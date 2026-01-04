@@ -12,3 +12,4 @@ dependencies:
   - vispy
   - zarr
   - ndv
+  - scipy
