@@ -15,12 +15,13 @@ import pytest
 import xarray as xr
 
 # Import from ndviewer_light to register the wrapper (side effect of import)
-from ndviewer_light import MAX_3D_TEXTURE_SIZE, NDV_AVAILABLE
+from ndviewer_light import MAX_3D_TEXTURE_SIZE, NDV_AVAILABLE, LAZY_LOADING_AVAILABLE
 
-# Skip all tests in this module if NDV is not available
+# Skip all tests in this module if NDV or lazy loading dependencies are not available
+# The Downsampling3DXarrayWrapper is only defined when both are True
 pytestmark = pytest.mark.skipif(
-    not NDV_AVAILABLE,
-    reason="NDV not available - downsampling wrapper not registered",
+    not (NDV_AVAILABLE and LAZY_LOADING_AVAILABLE),
+    reason="NDV or lazy loading dependencies not available - downsampling wrapper not registered",
 )
 
 
