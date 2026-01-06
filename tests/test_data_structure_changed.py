@@ -303,8 +303,6 @@ class TestDataStructureChangedEdgeCases:
         """
         # Create a mock that raises on .dims access
         old = MagicMock()
-        old.dims = property(lambda self: (_ for _ in ()).throw(RuntimeError("test")))
-        # Make dims access raise
         type(old).dims = property(
             lambda self: (_ for _ in ()).throw(RuntimeError("test"))
         )
