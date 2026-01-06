@@ -1184,6 +1184,49 @@ class LightweightViewer(QWidget):
 
             traceback.print_exc()
 
+    def set_current_index(self, dim: str, value: int) -> bool:
+        """Set the current index for a dimension in the viewer.
+
+        Programmatically navigate the viewer to a specific position along
+        a dimension (e.g., 'fov', 'time', 'z', 'channel').
+
+        Args:
+            dim: Dimension name (must exist in the loaded data).
+            value: Index value to set.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        if self.ndv_viewer is None:
+            logger.debug("set_current_index: no viewer available")
+            return False
+
+        try:
+            # NDV ArrayViewer uses display_model.current_index
+            if hasattr(self.ndv_viewer, "display_model"):
+                dm = self.ndv_viewer.display_model
+                if hasattr(dm, "current_index") and dim in dm.current_index:
+                    dm.current_index[dim] = value
+                    logger.debug(f"set_current_index: {dim}={value}")
+                    return True
+
+            # Fallback for older NDV versions using dims API
+            if hasattr(self.ndv_viewer, "dims"):
+                dims = self.ndv_viewer.dims
+                if hasattr(dims, "current_step"):
+                    current = dict(dims.current_step)
+                    if dim in current:
+                        current[dim] = value
+                        dims.current_step = current
+                        logger.debug(f"set_current_index (fallback): {dim}={value}")
+                        return True
+
+            logger.debug(f"set_current_index: dimension '{dim}' not found or API unavailable")
+            return False
+        except Exception as e:
+            logger.debug(f"set_current_index error: {e}")
+            return False
+
     def _create_lazy_array(self, base_path: Path) -> Optional[xr.DataArray]:
         """Create lazy xarray from dataset - auto-detects format."""
         if not LAZY_LOADING_AVAILABLE:
