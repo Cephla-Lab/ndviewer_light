@@ -1041,11 +1041,17 @@ class LightweightViewer(QWidget):
 
         # Swap dataset, keeping OME handles alive for the new data
         old_handles = getattr(self, "_open_handles", [])
+        old_data = self._xarray_data
         self._xarray_data = data
         self._open_handles = data.attrs.get("_open_tifs", [])
 
-        # Prefer in-place update to avoid visible refresh.
-        if self._try_inplace_ndv_update(data):
+        # Check if data structure changed (channels, dims) - if so, force full rebuild
+        structure_changed = self._data_structure_changed(old_data, data)
+
+        # Prefer in-place update to avoid visible refresh, but only if structure unchanged.
+        # When structure changes (e.g., different channels), we must rebuild the viewer
+        # to avoid stale channel controls persisting from the previous dataset.
+        if not structure_changed and self._try_inplace_ndv_update(data):
             # Update channel labels for the new data
             self._initiate_channel_label_update()
             # Close old handles after successful swap.
@@ -1069,8 +1075,59 @@ class LightweightViewer(QWidget):
                 except Exception as e:
                     logger.debug("Failed to close old handle: %s", e)
 
+    def _data_structure_changed(
+        self, old_data: Optional["xr.DataArray"], new_data: "xr.DataArray"
+    ) -> bool:
+        """Check if data structure changed significantly (requiring full viewer rebuild).
+
+        This detects changes in dimensions, channel count, channel names, or LUT
+        configuration that would require rebuilding the NDV viewer rather than
+        just swapping data in-place.
+
+        Returns:
+            True if structure changed and viewer needs full rebuild.
+        """
+        if old_data is None:
+            return True
+
+        try:
+            # Check if dims changed
+            if old_data.dims != new_data.dims:
+                return True
+
+            # Check if channel count changed
+            if "channel" in old_data.dims and "channel" in new_data.dims:
+                old_channels = old_data.coords.get("channel", [])
+                new_channels = new_data.coords.get("channel", [])
+                if len(old_channels) != len(new_channels):
+                    return True
+
+            # Check if channel names changed
+            old_names = old_data.attrs.get("channel_names", [])
+            new_names = new_data.attrs.get("channel_names", [])
+            if old_names != new_names:
+                return True
+
+            # Check if LUTs changed
+            old_luts = old_data.attrs.get("luts", {})
+            new_luts = new_data.attrs.get("luts", {})
+            if old_luts != new_luts:
+                return True
+
+            return False
+        except Exception as e:
+            # On any error, assume structure changed to be safe
+            logger.debug("Error checking data structure change: %s", e)
+            return True
+
     def load_dataset(self, path: str):
         """Load dataset and display in NDV."""
+        # Reset state when loading a new dataset to ensure clean slate.
+        # This prevents stale channel controls from persisting when switching
+        # between datasets with different channel configurations.
+        self._last_sig = None
+        self._xarray_data = None
+
         self.dataset_path = path
         self.status_label.setText(f"Loading: {Path(path).name}...")
         QApplication.processEvents()
@@ -1080,6 +1137,8 @@ class LightweightViewer(QWidget):
             if data is not None:
                 self._xarray_data = data  # Store for profiling
                 self._open_handles = data.attrs.get("_open_tifs", [])
+                # Always do full rebuild when explicitly loading a new dataset.
+                # This ensures channels/LUTs are properly reset.
                 self._set_ndv_data(data)
 
                 # Update status (keep it stable during live acquisition; avoid printing dims like time=...)
