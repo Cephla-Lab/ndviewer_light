@@ -708,6 +708,59 @@ def wavelength_to_colormap(wavelength: Optional[int]) -> str:
     return "gray"
 
 
+def data_structure_changed(
+    old_data: Optional["xr.DataArray"], new_data: "xr.DataArray"
+) -> bool:
+    """Check if data structure changed significantly (requiring full viewer rebuild).
+
+    This is a module-level utility function that detects changes in dimensions,
+    dtype, channel count, channel names, or LUT configuration that would require
+    rebuilding the NDV viewer rather than just swapping data in-place.
+
+    This function is used by both the LightweightViewer class and unit tests,
+    ensuring a single source of truth for the comparison logic.
+
+    Args:
+        old_data: Previous dataset state. May be ``None`` if no prior dataset
+            exists; when ``None``, the structure is treated as changed.
+        new_data: Newly loaded dataset to compare against ``old_data``.
+
+    Returns:
+        True if structure changed and viewer needs full rebuild.
+
+    Raises:
+        Any exception from xarray attribute access is propagated to the caller.
+    """
+    if old_data is None:
+        return True
+
+    # Check if dims changed
+    if old_data.dims != new_data.dims:
+        return True
+
+    # Check if dtype changed (may need different contrast limits)
+    if old_data.dtype != new_data.dtype:
+        return True
+
+    # Check if channel count changed; treat missing "channel" dim as having 0 channels
+    if old_data.sizes.get("channel", 0) != new_data.sizes.get("channel", 0):
+        return True
+
+    # Check if channel names changed
+    old_names = old_data.attrs.get("channel_names", [])
+    new_names = new_data.attrs.get("channel_names", [])
+    if old_names != new_names:
+        return True
+
+    # Check if LUTs changed
+    old_luts = old_data.attrs.get("luts", {})
+    new_luts = new_data.attrs.get("luts", {})
+    if old_luts != new_luts:
+        return True
+
+    return False
+
+
 def _apply_dark_theme(widget: QWidget) -> None:
     """Apply dark Fusion theme to a widget."""
     widget.setStyle(QStyleFactory.create("Fusion"))
@@ -1041,11 +1094,17 @@ class LightweightViewer(QWidget):
 
         # Swap dataset, keeping OME handles alive for the new data
         old_handles = getattr(self, "_open_handles", [])
+        old_data = self._xarray_data
         self._xarray_data = data
         self._open_handles = data.attrs.get("_open_tifs", [])
 
-        # Prefer in-place update to avoid visible refresh.
-        if self._try_inplace_ndv_update(data):
+        # Check if data structure changed (dims, channels, channel names, or LUTs) - if so, force full rebuild
+        structure_changed = self._data_structure_changed(old_data, data)
+
+        # Prefer in-place update to avoid visible refresh, but only if structure unchanged.
+        # When structure changes (e.g., different channels), we must rebuild the viewer
+        # to avoid stale channel controls persisting from the previous dataset.
+        if not structure_changed and self._try_inplace_ndv_update(data):
             # Update channel labels for the new data
             self._initiate_channel_label_update()
             # Close old handles after successful swap.
@@ -1069,8 +1128,39 @@ class LightweightViewer(QWidget):
                 except Exception as e:
                     logger.debug("Failed to close old handle: %s", e)
 
+    def _data_structure_changed(
+        self, old_data: Optional["xr.DataArray"], new_data: "xr.DataArray"
+    ) -> bool:
+        """Check if data structure changed significantly (requiring full viewer rebuild).
+
+        Delegates to the module-level :func:`data_structure_changed` function,
+        wrapping it with exception handling for safety in the viewer context.
+
+        Args:
+            old_data: Previous dataset state (or None for first load).
+            new_data: Newly loaded dataset to compare.
+
+        Returns:
+            True if structure changed and viewer needs full rebuild.
+        """
+        try:
+            return data_structure_changed(old_data, new_data)
+        except Exception as e:
+            # On any error, assume structure changed to be safe
+            logger.debug("Error checking data structure change: %s", e)
+            return True
+
     def load_dataset(self, path: str):
         """Load dataset and display in NDV."""
+        # Close any previously open file handles before loading new dataset
+        self._close_open_handles()
+
+        # Reset state when loading a new dataset to ensure clean slate.
+        # This prevents stale channel controls from persisting when switching
+        # between datasets with different channel configurations.
+        self._last_sig = None
+        self._xarray_data = None
+
         self.dataset_path = path
         self.status_label.setText(f"Loading: {Path(path).name}...")
         QApplication.processEvents()
@@ -1080,6 +1170,8 @@ class LightweightViewer(QWidget):
             if data is not None:
                 self._xarray_data = data  # Store for profiling
                 self._open_handles = data.attrs.get("_open_tifs", [])
+                # Always do full rebuild when explicitly loading a new dataset.
+                # This ensures channels/LUTs are properly reset.
                 self._set_ndv_data(data)
 
                 # Update status (keep it stable during live acquisition; avoid printing dims like time=...)
@@ -1091,6 +1183,51 @@ class LightweightViewer(QWidget):
             import traceback
 
             traceback.print_exc()
+
+    def set_current_index(self, dim: str, value: int) -> bool:
+        """Set the current index for a dimension in the viewer.
+
+        Programmatically navigate the viewer to a specific position along
+        a dimension (e.g., 'fov', 'time', 'z', 'channel').
+
+        Args:
+            dim: Dimension name (must exist in the loaded data).
+            value: Index value to set.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        if self.ndv_viewer is None:
+            logger.debug("set_current_index: no viewer available")
+            return False
+
+        try:
+            # NDV ArrayViewer uses display_model.current_index
+            if hasattr(self.ndv_viewer, "display_model"):
+                dm = self.ndv_viewer.display_model
+                if hasattr(dm, "current_index") and dim in dm.current_index:
+                    dm.current_index[dim] = value
+                    logger.debug(f"set_current_index: {dim}={value}")
+                    return True
+
+            # Fallback for older NDV versions using dims API
+            if hasattr(self.ndv_viewer, "dims"):
+                dims = self.ndv_viewer.dims
+                if hasattr(dims, "current_step"):
+                    current = dict(dims.current_step)
+                    if dim in current:
+                        current[dim] = value
+                        dims.current_step = current
+                        logger.debug(f"set_current_index (fallback): {dim}={value}")
+                        return True
+
+            logger.debug(
+                f"set_current_index: dimension '{dim}' not found or API unavailable"
+            )
+            return False
+        except Exception as e:
+            logger.debug(f"set_current_index error: {e}")
+            return False
 
     def _create_lazy_array(self, base_path: Path) -> Optional[xr.DataArray]:
         """Create lazy xarray from dataset - auto-detects format."""
