@@ -1124,6 +1124,9 @@ class LightweightViewer(QWidget):
 
     def load_dataset(self, path: str):
         """Load dataset and display in NDV."""
+        # Close any previously open file handles before loading new dataset
+        self._close_open_handles()
+
         # Reset state when loading a new dataset to ensure clean slate.
         # This prevents stale channel controls from persisting when switching
         # between datasets with different channel configurations.
