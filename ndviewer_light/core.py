@@ -1251,6 +1251,17 @@ class LightweightViewer(QWidget):
             logger.debug(f"get_fov_list error: {e}")
             return []
 
+    def has_fov_dimension(self) -> bool:
+        """Check if loaded data has an FOV dimension.
+
+        Returns:
+            True if data is loaded and has 'fov' dimension, False otherwise.
+        """
+        xarray_data = getattr(self, "_xarray_data", None)
+        if xarray_data is None:
+            return False
+        return "fov" in xarray_data.dims
+
     def _create_lazy_array(self, base_path: Path) -> Optional[xr.DataArray]:
         """Create lazy xarray from dataset - auto-detects format."""
         if not LAZY_LOADING_AVAILABLE:
