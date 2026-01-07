@@ -154,18 +154,17 @@ class TestGetFovList:
         assert result == expected
 
     def test_handles_exception_gracefully(self):
-        """When an exception occurs, should return empty list."""
-        # This tests the try/except wrapper in get_fov_list
-        # We can't easily test the full method without Qt, but we verify
-        # the expected behavior is documented
-        from ndviewer_light import logger
+        """When an exception occurs, should return empty list.
 
-        # The method should catch exceptions and return []
-        # This is verified by code inspection - the method has:
-        # except Exception as e:
-        #     logger.debug(f"get_fov_list error: {e}")
-        #     return []
-        pass  # Behavior verified by code review
+        This tests the try/except wrapper in get_fov_list. We can't easily
+        test the full method without Qt, but the expected behavior is
+        verified by code inspection - the method has:
+            except Exception as e:
+                logger.debug(f"get_fov_list error: {e}")
+                return []
+        """
+        # Behavior verified by code review - method catches all exceptions
+        pass
 
     def test_empty_directory_returns_empty_list(self, tmp_path):
         """When dataset directory exists but has no matching files."""
