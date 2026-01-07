@@ -1229,6 +1229,28 @@ class LightweightViewer(QWidget):
             logger.debug(f"set_current_index error: {e}")
             return False
 
+    def get_fov_list(self) -> List[Dict]:
+        """Get the list of FOVs for the currently loaded dataset.
+
+        Returns a list of dicts with 'region' (well ID) and 'fov' (FOV index)
+        keys, sorted by region then FOV. This can be used to map between
+        (well_id, fov_index) pairs and flat xarray FOV dimension indices.
+
+        Returns:
+            List of {"region": str, "fov": int} dicts, or empty list if no
+            dataset is loaded.
+        """
+        if self.dataset_path is None:
+            return []
+
+        try:
+            base_path = Path(self.dataset_path)
+            fmt = detect_format(base_path)
+            return self._discover_fovs(base_path, fmt)
+        except Exception as e:
+            logger.debug(f"get_fov_list error: {e}")
+            return []
+
     def _create_lazy_array(self, base_path: Path) -> Optional[xr.DataArray]:
         """Create lazy xarray from dataset - auto-detects format."""
         if not LAZY_LOADING_AVAILABLE:
