@@ -87,8 +87,13 @@ try:
                 """
                 _orig_init(self, *args, **kwargs)
                 # Capture the voxel scale active at construction time
+                # Use try/except to handle frozen vispy objects (e.g., napari's Volume)
                 global _current_voxel_scale
-                self._voxel_scale = _current_voxel_scale
+                try:
+                    self._voxel_scale = _current_voxel_scale
+                except AttributeError:
+                    # Object is frozen (e.g., napari), skip the patch
+                    pass
 
             VolumeVisual.__init__ = _patched_init
 
