@@ -22,4 +22,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
+# Note: py-modules installs ndviewer_light.py as a single module for pip install.
+# When used as a git submodule or run from source, __init__.py at root makes
+# the directory a package. Both scenarios support `from ndviewer_light import ...`
 py-modules = ["ndviewer_light"]
