@@ -1,77 +1,136 @@
 """
 Unit tests for get_fov_list() method in LightweightViewer.
 
-Tests cover:
-1. Returns empty list when dataset_path is None/empty
-2. Returns correct FOV list for OME-TIFF format datasets
-3. Returns correct FOV list for single-TIFF format datasets
-4. Handles exceptions gracefully and returns empty list
-5. Results are sorted by region then FOV as documented
+Tests use mocks to avoid Qt dependencies while testing the actual method.
 """
 
-import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
 class TestGetFovList:
     """Tests for LightweightViewer.get_fov_list() method."""
 
+    def _create_mock_viewer(self, dataset_path=None):
+        """Create a mock viewer with get_fov_list method from real class."""
+        from ndviewer_light import LightweightViewer
+
+        mock = MagicMock(spec=LightweightViewer)
+        mock.dataset_path = dataset_path
+        # Bind the real method to our mock
+        mock.get_fov_list = lambda: LightweightViewer.get_fov_list(mock)
+        return mock
+
     def test_returns_empty_list_when_no_dataset_path(self):
         """When dataset_path is not set, should return empty list."""
-        # Create a mock viewer without Qt dependencies
-        mock_viewer = MagicMock()
-        mock_viewer.dataset_path = None
-
-        # Test the logic directly - dataset_path is None
-        result = []
-        if mock_viewer.dataset_path is None:
-            result = []
+        viewer = self._create_mock_viewer(dataset_path=None)
+        result = viewer.get_fov_list()
         assert result == []
 
     def test_returns_empty_list_when_dataset_path_empty(self):
         """When dataset_path is empty string, should return empty list."""
-        mock_viewer = MagicMock()
-        mock_viewer.dataset_path = ""
-
-        # Using getattr pattern as suggested
-        result = []
-        if not getattr(mock_viewer, "dataset_path", ""):
-            result = []
+        viewer = self._create_mock_viewer(dataset_path="")
+        result = viewer.get_fov_list()
         assert result == []
 
-    def test_ome_tiff_fov_discovery(self, tmp_path):
+    @patch("ndviewer_light.detect_format")
+    def test_calls_detect_format_with_dataset_path(self, mock_detect):
+        """Should call detect_format with the dataset path."""
+        mock_detect.return_value = "ome_tiff"
+
+        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
+        viewer._discover_fovs = MagicMock(return_value=[])
+
+        viewer.get_fov_list()
+
+        mock_detect.assert_called_once()
+        # Verify Path was created from dataset_path
+        call_args = mock_detect.call_args[0][0]
+        assert str(call_args) == "/test/dataset"
+
+    @patch("ndviewer_light.detect_format")
+    def test_returns_fovs_from_discover_fovs(self, mock_detect):
+        """Should return the FOV list from _discover_fovs."""
+        mock_detect.return_value = "ome_tiff"
+        expected_fovs = [
+            {"region": "A1", "fov": 0},
+            {"region": "A1", "fov": 1},
+            {"region": "B1", "fov": 0},
+        ]
+
+        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
+        viewer._discover_fovs = MagicMock(return_value=expected_fovs)
+
+        result = viewer.get_fov_list()
+
+        assert result == expected_fovs
+        viewer._discover_fovs.assert_called_once()
+
+    @patch("ndviewer_light.detect_format")
+    def test_handles_detect_format_exception(self, mock_detect):
+        """When detect_format raises, should return empty list."""
+        mock_detect.side_effect = ValueError("Invalid format")
+
+        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
+
+        result = viewer.get_fov_list()
+
+        assert result == []
+
+    @patch("ndviewer_light.detect_format")
+    def test_handles_discover_fovs_exception(self, mock_detect):
+        """When _discover_fovs raises, should return empty list."""
+        mock_detect.return_value = "ome_tiff"
+
+        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
+        viewer._discover_fovs = MagicMock(side_effect=OSError("Permission denied"))
+
+        result = viewer.get_fov_list()
+
+        assert result == []
+
+    @patch("ndviewer_light.detect_format")
+    def test_passes_format_to_discover_fovs(self, mock_detect):
+        """Should pass detected format to _discover_fovs."""
+        mock_detect.return_value = "single_tiff"
+
+        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
+        viewer._discover_fovs = MagicMock(return_value=[])
+
+        viewer.get_fov_list()
+
+        # Verify _discover_fovs was called with correct format
+        call_args = viewer._discover_fovs.call_args
+        assert call_args[0][1] == "single_tiff"
+
+
+class TestDiscoverFovsIntegration:
+    """Integration tests for _discover_fovs with real filesystem."""
+
+    def test_ome_tiff_discovery(self, tmp_path):
         """Test FOV discovery for OME-TIFF format datasets."""
-        # Create mock OME-TIFF directory structure
-        ome_dir = tmp_path / "ome_tiff"
+        from ndviewer_light import LightweightViewer
+
+        # Create correct directory structure: dataset_root/ome_tiff/*.ome.tif
+        dataset_root = tmp_path / "dataset"
+        dataset_root.mkdir()
+        ome_dir = dataset_root / "ome_tiff"
         ome_dir.mkdir()
 
-        # Create test OME-TIFF files with standard naming pattern
-        # Pattern: *_<region>_<fov>.ome.tif
+        # Create test OME-TIFF files
         test_files = [
-            "image_A1_0.ome.tif",
-            "image_A1_1.ome.tif",
-            "image_A2_0.ome.tif",
-            "image_B1_0.ome.tif",
+            "A1_0.ome.tif",
+            "A1_1.ome.tif",
+            "A2_0.ome.tif",
+            "B1_0.ome.tif",
         ]
         for fname in test_files:
             (ome_dir / fname).touch()
 
-        # Import the pattern regex
-        from ndviewer_light import FPATTERN_OME
+        # Create mock viewer and call real _discover_fovs
+        mock = MagicMock(spec=LightweightViewer)
+        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
 
-        # Verify the pattern matches our test files
-        for fname in test_files:
-            match = FPATTERN_OME.search(fname)
-            assert match is not None, f"Pattern should match {fname}"
-
-        # Test discovery directly
-        fov_set = set()
-        for f in ome_dir.glob("*.ome.tif*"):
-            if m := FPATTERN_OME.search(f.name):
-                fov_set.add((m.group("r"), int(m.group("f"))))
-
-        result = [{"region": r, "fov": f} for r, f in sorted(fov_set)]
+        result = mock._discover_fovs(dataset_root, "ome_tiff")
 
         # Verify results are sorted by region then FOV
         assert len(result) == 4
@@ -80,14 +139,17 @@ class TestGetFovList:
         assert result[2] == {"region": "A2", "fov": 0}
         assert result[3] == {"region": "B1", "fov": 0}
 
-    def test_single_tiff_fov_discovery(self, tmp_path):
+    def test_single_tiff_discovery(self, tmp_path):
         """Test FOV discovery for single-TIFF format datasets."""
-        # Create mock single-TIFF directory structure (timestamped dirs)
-        timepoint_dir = tmp_path / "0"  # First timepoint
+        from ndviewer_light import LightweightViewer
+
+        # Create correct structure: dataset_root/0/*.tiff (timepoint dir)
+        dataset_root = tmp_path / "dataset"
+        dataset_root.mkdir()
+        timepoint_dir = dataset_root / "0"
         timepoint_dir.mkdir()
 
-        # Create test TIFF files with standard naming pattern
-        # Pattern: <region>_<fov>_<z>_<channel>.tiff
+        # Create test TIFF files: <region>_<fov>_<z>_<channel>.tiff
         test_files = [
             "A1_0_0_405.tiff",
             "A1_1_0_405.tiff",
@@ -97,53 +159,42 @@ class TestGetFovList:
         for fname in test_files:
             (timepoint_dir / fname).touch()
 
-        from ndviewer_light import FPATTERN
+        mock = MagicMock(spec=LightweightViewer)
+        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
 
-        # Verify the pattern matches our test files
-        for fname in test_files:
-            match = FPATTERN.search(fname)
-            assert match is not None, f"Pattern should match {fname}"
+        result = mock._discover_fovs(dataset_root, "single_tiff")
 
-        # Test discovery directly
-        fov_set = set()
-        for f in timepoint_dir.glob("*.tiff"):
-            if m := FPATTERN.search(f.name):
-                fov_set.add((m.group("r"), int(m.group("f"))))
-
-        result = [{"region": r, "fov": f} for r, f in sorted(fov_set)]
-
-        # Verify results (unique FOVs, sorted)
-        assert len(result) == 3  # A1_0, A1_1, B1_0 (A1_0 deduplicated)
+        # Verify unique FOVs, sorted
+        assert len(result) == 3  # A1_0, A1_1, B1_0
         assert result[0] == {"region": "A1", "fov": 0}
         assert result[1] == {"region": "A1", "fov": 1}
         assert result[2] == {"region": "B1", "fov": 0}
 
     def test_fov_list_sorted_by_region_then_fov(self, tmp_path):
         """Verify FOV list is sorted by region first, then by FOV index."""
-        ome_dir = tmp_path / "ome_tiff"
+        from ndviewer_light import LightweightViewer
+
+        dataset_root = tmp_path / "dataset"
+        dataset_root.mkdir()
+        ome_dir = dataset_root / "ome_tiff"
         ome_dir.mkdir()
 
         # Create files in non-sorted order
         test_files = [
-            "image_B2_1.ome.tif",
-            "image_A1_0.ome.tif",
-            "image_B1_0.ome.tif",
-            "image_A2_1.ome.tif",
-            "image_A1_2.ome.tif",
+            "B2_1.ome.tif",
+            "A1_0.ome.tif",
+            "B1_0.ome.tif",
+            "A2_1.ome.tif",
+            "A1_2.ome.tif",
         ]
         for fname in test_files:
             (ome_dir / fname).touch()
 
-        from ndviewer_light import FPATTERN_OME
+        mock = MagicMock(spec=LightweightViewer)
+        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
 
-        fov_set = set()
-        for f in ome_dir.glob("*.ome.tif*"):
-            if m := FPATTERN_OME.search(f.name):
-                fov_set.add((m.group("r"), int(m.group("f"))))
+        result = mock._discover_fovs(dataset_root, "ome_tiff")
 
-        result = [{"region": r, "fov": f} for r, f in sorted(fov_set)]
-
-        # Verify sorting: A1, A2, B1, B2 and within each region by fov
         expected = [
             {"region": "A1", "fov": 0},
             {"region": "A1", "fov": 2},
@@ -153,61 +204,48 @@ class TestGetFovList:
         ]
         assert result == expected
 
-    def test_handles_exception_gracefully(self):
-        """When an exception occurs, should return empty list.
-
-        This tests the try/except wrapper in get_fov_list. We can't easily
-        test the full method without Qt, but the expected behavior is
-        verified by code inspection - the method has:
-            except Exception as e:
-                logger.debug(f"get_fov_list error: {e}")
-                return []
-        """
-        # Behavior verified by code review - method catches all exceptions
-        pass
-
     def test_empty_directory_returns_empty_list(self, tmp_path):
-        """When dataset directory exists but has no matching files."""
-        ome_dir = tmp_path / "ome_tiff"
-        ome_dir.mkdir()
+        """When dataset directory has no matching files."""
+        from ndviewer_light import LightweightViewer
 
+        dataset_root = tmp_path / "dataset"
+        dataset_root.mkdir()
+        ome_dir = dataset_root / "ome_tiff"
+        ome_dir.mkdir()
         # No files created
 
-        from ndviewer_light import FPATTERN_OME
+        mock = MagicMock(spec=LightweightViewer)
+        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
 
-        fov_set = set()
-        for f in ome_dir.glob("*.ome.tif*"):
-            if m := FPATTERN_OME.search(f.name):
-                fov_set.add((m.group("r"), int(m.group("f"))))
+        result = mock._discover_fovs(dataset_root, "ome_tiff")
 
-        result = [{"region": r, "fov": f} for r, f in sorted(fov_set)]
         assert result == []
 
     def test_non_matching_filenames_ignored(self, tmp_path):
         """Files that don't match the pattern should be ignored."""
-        ome_dir = tmp_path / "ome_tiff"
+        from ndviewer_light import LightweightViewer
+
+        dataset_root = tmp_path / "dataset"
+        dataset_root.mkdir()
+        ome_dir = dataset_root / "ome_tiff"
         ome_dir.mkdir()
 
         # Create files that don't match the pattern
         non_matching = [
             "random_file.ome.tif",
-            "no_region_fov.ome.tif",
+            "no_fov.ome.tif",
             "image.tif",  # Not .ome.tif
         ]
         for fname in non_matching:
             (ome_dir / fname).touch()
 
         # Create one valid file
-        (ome_dir / "valid_A1_0.ome.tif").touch()
+        (ome_dir / "A1_0.ome.tif").touch()
 
-        from ndviewer_light import FPATTERN_OME
+        mock = MagicMock(spec=LightweightViewer)
+        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
 
-        fov_set = set()
-        for f in ome_dir.glob("*.ome.tif*"):
-            if m := FPATTERN_OME.search(f.name):
-                fov_set.add((m.group("r"), int(m.group("f"))))
-
-        result = [{"region": r, "fov": f} for r, f in sorted(fov_set)]
+        result = mock._discover_fovs(dataset_root, "ome_tiff")
 
         # Only the valid file should be discovered
         assert len(result) == 1
