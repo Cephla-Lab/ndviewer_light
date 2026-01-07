@@ -1,6 +1,6 @@
 """ndviewer_light - Lightweight NDV-based viewer for microscopy data."""
 
-from .ndviewer_light import (
+from .core import (
     FPATTERN,
     FPATTERN_OME,
     MAX_3D_TEXTURE_SIZE,
