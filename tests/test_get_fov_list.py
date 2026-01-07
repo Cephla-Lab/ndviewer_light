@@ -4,7 +4,7 @@ Unit tests for get_fov_list() method in LightweightViewer.
 Tests use mocks to avoid Qt dependencies while testing the actual method.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 class TestGetFovList:
@@ -32,84 +32,28 @@ class TestGetFovList:
         result = viewer.get_fov_list()
         assert result == []
 
-    @patch("ndviewer_light.detect_format")
-    def test_calls_detect_format_with_dataset_path(self, mock_detect):
-        """Should call detect_format with the dataset path."""
-        mock_detect.return_value = "ome_tiff"
-
-        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
-        viewer._discover_fovs = MagicMock(return_value=[])
-
-        viewer.get_fov_list()
-
-        mock_detect.assert_called_once()
-        # Verify Path was created from dataset_path
-        call_args = mock_detect.call_args[0][0]
-        assert str(call_args) == "/test/dataset"
-
-    @patch("ndviewer_light.detect_format")
-    def test_returns_fovs_from_discover_fovs(self, mock_detect):
-        """Should return the FOV list from _discover_fovs."""
-        mock_detect.return_value = "ome_tiff"
-        expected_fovs = [
-            {"region": "A1", "fov": 0},
-            {"region": "A1", "fov": 1},
-            {"region": "B1", "fov": 0},
-        ]
-
-        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
-        viewer._discover_fovs = MagicMock(return_value=expected_fovs)
-
+    def test_handles_nonexistent_path_gracefully(self):
+        """When dataset_path doesn't exist, should return empty list."""
+        viewer = self._create_mock_viewer(dataset_path="/nonexistent/path/to/dataset")
         result = viewer.get_fov_list()
-
-        assert result == expected_fovs
-        viewer._discover_fovs.assert_called_once()
-
-    @patch("ndviewer_light.detect_format")
-    def test_handles_detect_format_exception(self, mock_detect):
-        """When detect_format raises, should return empty list."""
-        mock_detect.side_effect = ValueError("Invalid format")
-
-        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
-
-        result = viewer.get_fov_list()
-
         assert result == []
 
-    @patch("ndviewer_light.detect_format")
-    def test_handles_discover_fovs_exception(self, mock_detect):
-        """When _discover_fovs raises, should return empty list."""
-        mock_detect.return_value = "ome_tiff"
 
-        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
-        viewer._discover_fovs = MagicMock(side_effect=OSError("Permission denied"))
+class TestGetFovListIntegration:
+    """Integration tests for get_fov_list() with real filesystem."""
 
-        result = viewer.get_fov_list()
+    def _create_mock_viewer_with_discover(self, dataset_path):
+        """Create mock viewer with real get_fov_list and _discover_fovs."""
+        from ndviewer_light import LightweightViewer
 
-        assert result == []
-
-    @patch("ndviewer_light.detect_format")
-    def test_passes_format_to_discover_fovs(self, mock_detect):
-        """Should pass detected format to _discover_fovs."""
-        mock_detect.return_value = "single_tiff"
-
-        viewer = self._create_mock_viewer(dataset_path="/test/dataset")
-        viewer._discover_fovs = MagicMock(return_value=[])
-
-        viewer.get_fov_list()
-
-        # Verify _discover_fovs was called with correct format
-        call_args = viewer._discover_fovs.call_args
-        assert call_args[0][1] == "single_tiff"
-
-
-class TestDiscoverFovsIntegration:
-    """Integration tests for _discover_fovs with real filesystem."""
+        mock = MagicMock(spec=LightweightViewer)
+        mock.dataset_path = dataset_path
+        mock.get_fov_list = lambda: LightweightViewer.get_fov_list(mock)
+        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
+        return mock
 
     def test_ome_tiff_discovery(self, tmp_path):
         """Test FOV discovery for OME-TIFF format datasets."""
-        from ndviewer_light import LightweightViewer
-
         # Create correct directory structure: dataset_root/ome_tiff/*.ome.tif
         dataset_root = tmp_path / "dataset"
         dataset_root.mkdir()
@@ -126,11 +70,8 @@ class TestDiscoverFovsIntegration:
         for fname in test_files:
             (ome_dir / fname).touch()
 
-        # Create mock viewer and call real _discover_fovs
-        mock = MagicMock(spec=LightweightViewer)
-        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
-
-        result = mock._discover_fovs(dataset_root, "ome_tiff")
+        viewer = self._create_mock_viewer_with_discover(str(dataset_root))
+        result = viewer.get_fov_list()
 
         # Verify results are sorted by region then FOV
         assert len(result) == 4
@@ -141,8 +82,6 @@ class TestDiscoverFovsIntegration:
 
     def test_single_tiff_discovery(self, tmp_path):
         """Test FOV discovery for single-TIFF format datasets."""
-        from ndviewer_light import LightweightViewer
-
         # Create correct structure: dataset_root/0/*.tiff (timepoint dir)
         dataset_root = tmp_path / "dataset"
         dataset_root.mkdir()
@@ -159,10 +98,8 @@ class TestDiscoverFovsIntegration:
         for fname in test_files:
             (timepoint_dir / fname).touch()
 
-        mock = MagicMock(spec=LightweightViewer)
-        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
-
-        result = mock._discover_fovs(dataset_root, "single_tiff")
+        viewer = self._create_mock_viewer_with_discover(str(dataset_root))
+        result = viewer.get_fov_list()
 
         # Verify unique FOVs, sorted
         assert len(result) == 3  # A1_0, A1_1, B1_0
@@ -172,8 +109,6 @@ class TestDiscoverFovsIntegration:
 
     def test_fov_list_sorted_by_region_then_fov(self, tmp_path):
         """Verify FOV list is sorted by region first, then by FOV index."""
-        from ndviewer_light import LightweightViewer
-
         dataset_root = tmp_path / "dataset"
         dataset_root.mkdir()
         ome_dir = dataset_root / "ome_tiff"
@@ -190,10 +125,8 @@ class TestDiscoverFovsIntegration:
         for fname in test_files:
             (ome_dir / fname).touch()
 
-        mock = MagicMock(spec=LightweightViewer)
-        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
-
-        result = mock._discover_fovs(dataset_root, "ome_tiff")
+        viewer = self._create_mock_viewer_with_discover(str(dataset_root))
+        result = viewer.get_fov_list()
 
         expected = [
             {"region": "A1", "fov": 0},
@@ -206,25 +139,19 @@ class TestDiscoverFovsIntegration:
 
     def test_empty_directory_returns_empty_list(self, tmp_path):
         """When dataset directory has no matching files."""
-        from ndviewer_light import LightweightViewer
-
         dataset_root = tmp_path / "dataset"
         dataset_root.mkdir()
         ome_dir = dataset_root / "ome_tiff"
         ome_dir.mkdir()
         # No files created
 
-        mock = MagicMock(spec=LightweightViewer)
-        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
-
-        result = mock._discover_fovs(dataset_root, "ome_tiff")
+        viewer = self._create_mock_viewer_with_discover(str(dataset_root))
+        result = viewer.get_fov_list()
 
         assert result == []
 
     def test_non_matching_filenames_ignored(self, tmp_path):
         """Files that don't match the pattern should be ignored."""
-        from ndviewer_light import LightweightViewer
-
         dataset_root = tmp_path / "dataset"
         dataset_root.mkdir()
         ome_dir = dataset_root / "ome_tiff"
@@ -242,10 +169,8 @@ class TestDiscoverFovsIntegration:
         # Create one valid file
         (ome_dir / "A1_0.ome.tif").touch()
 
-        mock = MagicMock(spec=LightweightViewer)
-        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
-
-        result = mock._discover_fovs(dataset_root, "ome_tiff")
+        viewer = self._create_mock_viewer_with_discover(str(dataset_root))
+        result = viewer.get_fov_list()
 
         # Only the valid file should be discovered
         assert len(result) == 1
