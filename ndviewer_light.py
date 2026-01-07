@@ -1240,7 +1240,7 @@ class LightweightViewer(QWidget):
             List of {"region": str, "fov": int} dicts, or empty list if no
             dataset is loaded.
         """
-        if self.dataset_path is None:
+        if not getattr(self, "dataset_path", ""):
             return []
 
         try:

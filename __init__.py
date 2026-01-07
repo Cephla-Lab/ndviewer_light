@@ -1,6 +1,8 @@
 """ndviewer_light - Lightweight NDV-based viewer for microscopy data."""
 
 from .ndviewer_light import (
+    FPATTERN,
+    FPATTERN_OME,
     MAX_3D_TEXTURE_SIZE,
     LightweightMainWindow,
     LightweightViewer,
@@ -13,6 +15,8 @@ from .ndviewer_light import (
 )
 
 __all__ = [
+    "FPATTERN",
+    "FPATTERN_OME",
     "MAX_3D_TEXTURE_SIZE",
     "LightweightMainWindow",
     "LightweightViewer",
