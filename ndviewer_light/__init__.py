@@ -1,5 +1,12 @@
 """ndviewer_light - Lightweight NDV-based viewer for microscopy data."""
 
+try:
+    from importlib.metadata import version
+
+    __version__ = version("ndviewer_light")
+except Exception:
+    __version__ = "unknown"
+
 from .core import (
     FPATTERN,
     FPATTERN_OME,
@@ -15,6 +22,7 @@ from .core import (
 )
 
 __all__ = [
+    "__version__",
     "FPATTERN",
     "FPATTERN_OME",
     "MAX_3D_TEXTURE_SIZE",
