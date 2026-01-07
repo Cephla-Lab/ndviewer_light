@@ -1262,6 +1262,14 @@ class LightweightViewer(QWidget):
             return False
         return "fov" in xarray_data.dims
 
+    def refresh(self) -> None:
+        """Force an immediate refresh of the viewer display.
+
+        Useful after loading a new dataset or when you want to update
+        the display without waiting for the automatic refresh timer.
+        """
+        self._force_refresh()
+
     def _create_lazy_array(self, base_path: Path) -> Optional[xr.DataArray]:
         """Create lazy xarray from dataset - auto-detects format."""
         if not LAZY_LOADING_AVAILABLE:
