@@ -1095,6 +1095,8 @@ class LightweightViewer(QWidget):
 
             # Verify refresh mechanism exists BEFORE mutating data to avoid
             # leaving viewer in inconsistent state if refresh isn't possible.
+            # Note: callable() check is defensive - we explicitly verify _request_data
+            # is a callable method, not just an attribute, since we rely on private APIs.
             has_request_data = hasattr(v, "_request_data") and callable(v._request_data)
             display_model = getattr(v, "display_model", None)
             current_index = (

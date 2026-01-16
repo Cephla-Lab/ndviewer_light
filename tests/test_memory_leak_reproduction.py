@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 Memory leak reproduction test for ndviewer_light in-place update fix.
 
@@ -43,6 +43,10 @@ def create_test_data(shape=(1, 1, 10, 3, 512, 512), iteration=0):
 
     Shape: (time, fov, z, channel, height, width)
     Each iteration creates slightly different data to simulate new frames.
+
+    Args:
+        shape: Array shape tuple
+        iteration: Used as random seed for reproducible test data
     """
     # Create a mock xarray DataArray with the essential attributes
     data = MagicMock()
@@ -52,8 +56,9 @@ def create_test_data(shape=(1, 1, 10, 3, 512, 512), iteration=0):
     data.attrs = {"channel_names": ["DAPI", "GFP", "RFP"], "luts": {}}
 
     # Store actual numpy array to simulate real memory usage
-    # This is what would be passed to ndv in real usage
-    data._backing_array = np.random.randint(0, 65535, size=shape, dtype=np.uint16)
+    # Use iteration as seed for reproducibility while still varying data
+    rng = np.random.default_rng(seed=iteration)
+    data._backing_array = rng.integers(0, 65535, size=shape, dtype=np.uint16)
     data.values = data._backing_array
 
     return data
