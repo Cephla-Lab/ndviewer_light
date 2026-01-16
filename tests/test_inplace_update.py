@@ -194,8 +194,47 @@ class TestInplaceUpdate:
         new_data = self._create_mock_data(shape=(10, 100, 100))
         result = viewer._try_inplace_ndv_update(new_data)
 
-        # Data was updated but no refresh could be triggered
+        # Should return False without mutating data (refresh check happens first)
         assert result is False
+        # Verify data was NOT mutated since refresh isn't possible
+        assert wrapper._data is not new_data
+
+    def test_returns_false_when_current_index_is_none(self):
+        """Returns False when display_model.current_index is None."""
+        viewer = self._create_mock_viewer()
+        ndv_viewer, data_model, wrapper = self._setup_ndv_viewer_mock(viewer)
+
+        # Remove _request_data and set current_index to None
+        del ndv_viewer._request_data
+        display_model = MagicMock()
+        display_model.current_index = None
+        ndv_viewer.display_model = display_model
+
+        new_data = self._create_mock_data(shape=(10, 100, 100))
+        result = viewer._try_inplace_ndv_update(new_data)
+
+        assert result is False
+        # Verify data was NOT mutated
+        assert wrapper._data is not new_data
+
+    def test_returns_false_when_current_index_has_no_update(self):
+        """Returns False when current_index exists but has no update() method."""
+        viewer = self._create_mock_viewer()
+        ndv_viewer, data_model, wrapper = self._setup_ndv_viewer_mock(viewer)
+
+        # Remove _request_data and provide current_index without update method
+        del ndv_viewer._request_data
+        current_index = MagicMock(spec=[])  # No update method
+        display_model = MagicMock()
+        display_model.current_index = current_index
+        ndv_viewer.display_model = display_model
+
+        new_data = self._create_mock_data(shape=(10, 100, 100))
+        result = viewer._try_inplace_ndv_update(new_data)
+
+        assert result is False
+        # Verify data was NOT mutated
+        assert wrapper._data is not new_data
 
     # === Fallback to Public data Property ===
 

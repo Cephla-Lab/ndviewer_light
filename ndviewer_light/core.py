@@ -1038,6 +1038,9 @@ class LightweightViewer(QWidget):
         leak-free. For shape changes, we return False to trigger a full viewer
         rebuild (unavoidable until ndv fixes the upstream issue).
 
+        TODO: Remove this workaround once the upstream ndv issue #209 is resolved.
+        When fixed, this method can be replaced with: self.ndv_viewer.data = data
+
         Returns:
             True if in-place update succeeded, False if full rebuild is needed.
         """
@@ -1048,6 +1051,7 @@ class LightweightViewer(QWidget):
         try:
             # Get the data wrapper via the correct path: v._data_model.data_wrapper
             # This is ndv's internal structure for storing the wrapped array data.
+            # Note: This uses private ndv APIs and may break with future ndv versions.
             data_model = getattr(v, "_data_model", None)
             if data_model is None:
                 logger.debug("No _data_model found on viewer")
@@ -1083,44 +1087,44 @@ class LightweightViewer(QWidget):
                 )
                 return False
 
-            # Shapes match - update the wrapper's internal data reference directly.
-            # This bypasses the ArrayViewer.data setter which leaks GPU handles.
+            # Verify refresh mechanism exists BEFORE mutating data to avoid
+            # leaving viewer in inconsistent state if refresh isn't possible.
+            has_request_data = hasattr(v, "_request_data") and callable(v._request_data)
+            display_model = getattr(v, "display_model", None)
+            current_index = None
+            if display_model is not None:
+                current_index = getattr(display_model, "current_index", None)
+            has_index_update = current_index is not None and hasattr(
+                current_index, "update"
+            )
+
+            if not has_request_data and not has_index_update:
+                logger.debug(
+                    "No compatible refresh trigger found, skipping in-place update"
+                )
+                return False
+
+            # Now safe to mutate - we've verified refresh is possible.
             wrapper._data = data
             logger.debug("Updated wrapper._data directly")
 
-            # Trigger display refresh. We try multiple approaches for compatibility
-            # across ndv versions:
-            #
-            # 1. _request_data() - directly requests fresh data (preferred)
-            # 2. display_model.current_index.update() - triggers index change event
-            #    which in turn calls _on_model_current_index_changed -> _request_data
-            #
-            # The update() call on the evented dict triggers change notifications
-            # even if no values actually change, causing a refresh.
-
-            # Try direct _request_data first (most reliable)
-            if hasattr(v, "_request_data") and callable(v._request_data):
+            # Trigger display refresh using the mechanism we already verified exists.
+            if has_request_data:
                 v._request_data()
                 logger.debug("In-place update successful via _request_data()")
                 return True
+            else:
+                current_index.update()
+                logger.debug("In-place update successful via current_index.update()")
+                return True
 
-            # Fallback: trigger via current_index.update()
-            display_model = getattr(v, "display_model", None)
-            if display_model is not None:
-                current_index = getattr(display_model, "current_index", None)
-                if current_index is not None and hasattr(current_index, "update"):
-                    # update() on evented dict triggers change notifications
-                    current_index.update()
-                    logger.debug(
-                        "In-place update successful via current_index.update()"
-                    )
-                    return True
-
-            logger.debug("No compatible refresh trigger found")
-            return False
-
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            # Never suppress critical system exceptions
+            raise
         except Exception as e:
-            logger.debug("In-place update failed: %s", e)
+            logger.warning(
+                "In-place update failed unexpectedly: %s (%s)", e, type(e).__name__
+            )
             return False
 
     def _maybe_refresh(self):
