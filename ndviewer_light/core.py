@@ -1026,109 +1026,24 @@ class LightweightViewer(QWidget):
         )
 
     def _try_inplace_ndv_update(self, data: "xr.DataArray") -> bool:
-        """Best-effort no-flicker data swap for ndv, avoiding memory leaks.
+        """Update ndv data in-place to avoid memory leak (ndv#209).
 
-        IMPORTANT: This method avoids using ndv's data property setter because it
-        leaks GPU handles (see https://github.com/pyapp-kit/ndv/issues/209).
-        Instead, we update the underlying data wrapper directly and trigger a
-        display refresh, which bypasses the leaky code path.
-
-        For shape-compatible updates (same dimensions), this is both faster and
-        leak-free. For shape changes, we return False to trigger a full viewer
-        rebuild (unavoidable until ndv fixes the upstream issue).
-
-        TODO: Remove this workaround once the upstream ndv issue #209 is resolved.
-        When fixed, this method can be replaced with: self.ndv_viewer.data = data
-
-        Returns:
-            True if in-place update succeeded, False if full rebuild is needed.
+        Bypasses ndv's data setter which leaks GPU handles. Returns False
+        if update fails, triggering a full rebuild by the caller.
         """
         v = self.ndv_viewer
         if v is None:
             return False
 
         try:
-            # Get the data wrapper via the correct path: v._data_model.data_wrapper
-            # This is ndv's internal structure for storing the wrapped array data.
-            # Note: This uses private ndv APIs and may break with future ndv versions.
-            data_model = getattr(v, "_data_model", None)
-            if data_model is None:
-                logger.debug("No _data_model found on viewer")
+            wrapper = v._data_model.data_wrapper
+            if wrapper._data is None or wrapper._data.shape != data.shape:
                 return False
 
-            wrapper = getattr(data_model, "data_wrapper", None)
-            if wrapper is None:
-                logger.debug("No data_wrapper found on _data_model")
-                return False
-
-            # Check shape compatibility - we can only do in-place update if shapes match.
-            # Track which attribute path we used for reading so we write to the same one.
-            if getattr(wrapper, "_data", None) is not None:
-                old_data = wrapper._data
-                data_attr = "_data"
-            elif getattr(wrapper, "data", None) is not None:
-                old_data = wrapper.data
-                data_attr = "data"
-            else:
-                logger.debug("No data found in wrapper")
-                return False
-
-            old_shape = getattr(old_data, "shape", None)
-            new_shape = getattr(data, "shape", None)
-            if old_shape is None or new_shape is None:
-                logger.debug("Could not determine shapes")
-                return False
-
-            if old_shape != new_shape:
-                logger.debug(
-                    "Shape changed %s -> %s, cannot do in-place update",
-                    old_shape,
-                    new_shape,
-                )
-                return False
-
-            # Verify refresh mechanism exists BEFORE mutating data to avoid
-            # leaving viewer in inconsistent state if refresh isn't possible.
-            # Note: callable() check is defensive - we explicitly verify _request_data
-            # is a callable method, not just an attribute, since we rely on private APIs.
-            has_request_data = hasattr(v, "_request_data") and callable(v._request_data)
-            display_model = getattr(v, "display_model", None)
-            current_index = (
-                getattr(display_model, "current_index", None) if display_model else None
-            )
-            has_index_update = (
-                current_index is not None
-                and hasattr(current_index, "update")
-                and callable(current_index.update)
-            )
-
-            if not has_request_data and not has_index_update:
-                logger.debug(
-                    "No compatible refresh trigger found, skipping in-place update"
-                )
-                return False
-
-            # Now safe to mutate - we've verified refresh is possible.
-            # Use the same attribute path we read from to maintain consistency.
-            setattr(wrapper, data_attr, data)
-            logger.debug("Updated wrapper.%s directly", data_attr)
-
-            # Trigger display refresh using the mechanism we already verified exists.
-            if has_request_data:
-                v._request_data()
-                logger.debug("In-place update successful via _request_data()")
-            else:
-                current_index.update()
-                logger.debug("In-place update successful via current_index.update()")
+            wrapper._data = data
+            v._request_data()
             return True
-
-        except (KeyboardInterrupt, SystemExit, MemoryError):
-            # Never suppress critical system exceptions
-            raise
-        except Exception as e:
-            logger.warning(
-                "In-place update failed unexpectedly: %s (%s)", e, type(e).__name__
-            )
+        except Exception:
             return False
 
     def _maybe_refresh(self):
