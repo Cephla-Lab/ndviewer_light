@@ -926,7 +926,7 @@ class LightweightViewer(QWidget):
 
     def _close_open_handles(self):
         """Close mmap TiffFile handles (OME path) from the previously loaded dataset."""
-        for h in getattr(self, "_open_handles", []) or []:
+        for h in getattr(self, "_open_handles", []):
             try:
                 h.close()
             except Exception as e:
