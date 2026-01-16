@@ -926,7 +926,7 @@ class LightweightViewer(QWidget):
 
     def _close_open_handles(self):
         """Close mmap TiffFile handles (OME path) from the previously loaded dataset."""
-        for h in getattr(self, "_open_handles", []) or []:
+        for h in getattr(self, "_open_handles", []):
             try:
                 h.close()
             except Exception as e:
@@ -1097,9 +1097,19 @@ class LightweightViewer(QWidget):
         if data is None:
             return
 
+        # Skip swap if shape unchanged to prevent flicker during file writes
+        old_data = self._xarray_data
+        if old_data is not None and data.shape == old_data.shape:
+            # Close unused handles from the newly loaded data we're discarding
+            for h in data.attrs.get("_open_tifs", []):
+                try:
+                    h.close()
+                except Exception as e:
+                    logger.debug("Failed to close unused TiffFile handle: %s", e)
+            return
+
         # Swap dataset, keeping OME handles alive for the new data
         old_handles = getattr(self, "_open_handles", [])
-        old_data = self._xarray_data
         self._xarray_data = data
         self._open_handles = data.attrs.get("_open_tifs", [])
 
