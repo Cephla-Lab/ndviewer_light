@@ -24,3 +24,9 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ndviewer_light"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+norecursedirs = ["__pycache__"]
+addopts = "--ignore=__init__.py"
