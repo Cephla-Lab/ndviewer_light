@@ -11,7 +11,6 @@ Tests use mocks to avoid Qt/ndv dependencies while verifying:
 4. Edge cases and error handling
 """
 
-import pytest
 from unittest.mock import MagicMock, PropertyMock
 
 
@@ -225,13 +224,22 @@ class TestInplaceUpdate:
     # === Fallback to Public data Property ===
 
     def test_uses_public_data_property_as_fallback(self):
-        """Falls back to wrapper.data if wrapper._data doesn't exist."""
+        """Falls back to wrapper.data if wrapper._data doesn't exist.
+
+        Verifies that:
+        1. Code reads from wrapper.data when _data is not available
+        2. Code writes to wrapper.data (not creating orphan _data)
+        """
         viewer = create_mock_viewer()
         ndv_viewer = MagicMock()
         data_model = MagicMock()
 
-        wrapper = MagicMock(spec=["data"])
-        wrapper.data = create_mock_data()
+        # Create wrapper that only has 'data' property, not '_data'
+        class DataOnlyWrapper:
+            def __init__(self):
+                self.data = create_mock_data()
+
+        wrapper = DataOnlyWrapper()
         data_model.data_wrapper = wrapper
         ndv_viewer._data_model = data_model
         ndv_viewer._request_data = MagicMock()
@@ -242,6 +250,9 @@ class TestInplaceUpdate:
 
         assert result is True
         ndv_viewer._request_data.assert_called_once()
+        # Verify data was written to 'data' attribute, not '_data'
+        assert wrapper.data is new_data
+        assert not hasattr(wrapper, "_data")
 
     # === Error Handling ===
 

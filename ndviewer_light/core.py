@@ -1062,9 +1062,20 @@ class LightweightViewer(QWidget):
                 logger.debug("No data_wrapper found on _data_model")
                 return False
 
-            # Check shape compatibility - we can only do in-place update if shapes match
-            old_data = getattr(wrapper, "_data", None) or getattr(wrapper, "data", None)
-            if old_data is None:
+            # Check shape compatibility - we can only do in-place update if shapes match.
+            # Track which attribute path we used for reading so we write to the same one.
+            if (
+                hasattr(wrapper, "_data")
+                and getattr(wrapper, "_data", None) is not None
+            ):
+                old_data = wrapper._data
+                data_attr = "_data"
+            elif (
+                hasattr(wrapper, "data") and getattr(wrapper, "data", None) is not None
+            ):
+                old_data = wrapper.data
+                data_attr = "data"
+            else:
                 logger.debug("No data found in wrapper")
                 return False
 
@@ -1100,8 +1111,9 @@ class LightweightViewer(QWidget):
                 return False
 
             # Now safe to mutate - we've verified refresh is possible.
-            wrapper._data = data
-            logger.debug("Updated wrapper._data directly")
+            # Use the same attribute path we read from to maintain consistency.
+            setattr(wrapper, data_attr, data)
+            logger.debug("Updated wrapper.%s directly", data_attr)
 
             # Trigger display refresh using the mechanism we already verified exists.
             if has_request_data:
