@@ -1111,7 +1111,9 @@ class LightweightViewer(QWidget):
                 if current_index is not None and hasattr(current_index, "update"):
                     # update() on evented dict triggers change notifications
                     current_index.update()
-                    logger.debug("In-place update successful via current_index.update()")
+                    logger.debug(
+                        "In-place update successful via current_index.update()"
+                    )
                     return True
 
             logger.debug("No compatible refresh trigger found")
