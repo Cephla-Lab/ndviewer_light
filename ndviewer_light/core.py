@@ -57,6 +57,17 @@ try:
                 if hasattr(self, "_slider"):
                     self._slider.setMinimum(a)
                     self._slider.setMaximum(b)
+
+                    # Proportional handle sizing based on number of positions
+                    num_positions = b - a + 1
+                    # Scale handle: larger for fewer positions, smaller for many
+                    # Clamp between 8px (minimum usable) and 40px (maximum reasonable)
+                    handle_width = max(8, min(40, 200 // max(1, num_positions)))
+                    self._slider.setStyleSheet(
+                        f"QSlider::handle:horizontal {{ width: {handle_width}px; }}"
+                        f"QSlider::handle:vertical {{ height: {handle_width}px; }}"
+                    )
+
                 if hasattr(self, "_label"):
                     try:
                         self._label.setRange(a, b)
