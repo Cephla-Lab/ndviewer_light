@@ -1063,23 +1063,18 @@ class LightweightViewer(QWidget):
                 return False
 
             # Check shape compatibility - we can only do in-place update if shapes match
-            old_data = getattr(wrapper, "_data", None)
-            if old_data is None:
-                # Try the public property as fallback
-                old_data = getattr(wrapper, "data", None)
+            old_data = getattr(wrapper, "_data", None) or getattr(wrapper, "data", None)
             if old_data is None:
                 logger.debug("No data found in wrapper")
                 return False
 
             old_shape = getattr(old_data, "shape", None)
             new_shape = getattr(data, "shape", None)
-
             if old_shape is None or new_shape is None:
                 logger.debug("Could not determine shapes")
                 return False
 
             if old_shape != new_shape:
-                # Shape changed - must rebuild viewer (will leak, but unavoidable)
                 logger.debug(
                     "Shape changed %s -> %s, cannot do in-place update",
                     old_shape,
@@ -1091,9 +1086,9 @@ class LightweightViewer(QWidget):
             # leaving viewer in inconsistent state if refresh isn't possible.
             has_request_data = hasattr(v, "_request_data") and callable(v._request_data)
             display_model = getattr(v, "display_model", None)
-            current_index = None
-            if display_model is not None:
-                current_index = getattr(display_model, "current_index", None)
+            current_index = (
+                getattr(display_model, "current_index", None) if display_model else None
+            )
             has_index_update = current_index is not None and hasattr(
                 current_index, "update"
             )
@@ -1112,11 +1107,10 @@ class LightweightViewer(QWidget):
             if has_request_data:
                 v._request_data()
                 logger.debug("In-place update successful via _request_data()")
-                return True
             else:
                 current_index.update()
                 logger.debug("In-place update successful via current_index.update()")
-                return True
+            return True
 
         except (KeyboardInterrupt, SystemExit, MemoryError):
             # Never suppress critical system exceptions
