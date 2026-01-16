@@ -1037,21 +1037,41 @@ class LightweightViewer(QWidget):
         For shape-compatible updates (same dimensions), this is both faster and
         leak-free. For shape changes, we return False to trigger a full viewer
         rebuild (unavoidable until ndv fixes the upstream issue).
+
+        Returns:
+            True if in-place update succeeded, False if full rebuild is needed.
         """
         v = self.ndv_viewer
         if v is None:
             return False
 
-        # Check shape compatibility - we can only do true in-place update if shapes match
         try:
-            old_data = getattr(v, "data", None)
+            # Get the data wrapper via the correct path: v._data_model.data_wrapper
+            # This is ndv's internal structure for storing the wrapped array data.
+            data_model = getattr(v, "_data_model", None)
+            if data_model is None:
+                logger.debug("No _data_model found on viewer")
+                return False
+
+            wrapper = getattr(data_model, "data_wrapper", None)
+            if wrapper is None:
+                logger.debug("No data_wrapper found on _data_model")
+                return False
+
+            # Check shape compatibility - we can only do in-place update if shapes match
+            old_data = getattr(wrapper, "_data", None)
             if old_data is None:
+                # Try the public property as fallback
+                old_data = getattr(wrapper, "data", None)
+            if old_data is None:
+                logger.debug("No data found in wrapper")
                 return False
 
             old_shape = getattr(old_data, "shape", None)
             new_shape = getattr(data, "shape", None)
 
             if old_shape is None or new_shape is None:
+                logger.debug("Could not determine shapes")
                 return False
 
             if old_shape != new_shape:
@@ -1063,33 +1083,38 @@ class LightweightViewer(QWidget):
                 )
                 return False
 
-            # Shapes match - update the data wrapper directly to avoid the leaky setter.
-            # The ndv ArrayViewer uses a DataWrapper internally. We update it directly
-            # and then trigger a display refresh via current_index.update().
-            if hasattr(v, "_data_wrapper") and v._data_wrapper is not None:
-                wrapper = v._data_wrapper
-                # Update the wrapper's internal data reference
-                if hasattr(wrapper, "_data"):
-                    wrapper._data = data
-                    # Trigger display refresh without recreating GPU handles
-                    if hasattr(v, "display_model") and hasattr(
-                        v.display_model, "current_index"
-                    ):
-                        v.display_model.current_index.update()
-                        logger.debug("In-place data wrapper update successful")
-                        return True
+            # Shapes match - update the wrapper's internal data reference directly.
+            # This bypasses the ArrayViewer.data setter which leaks GPU handles.
+            wrapper._data = data
+            logger.debug("Updated wrapper._data directly")
 
-            # Fallback: try display_model.data if available (some ndv versions)
-            if hasattr(v, "display_model"):
-                dm = v.display_model
-                if hasattr(dm, "_data"):
-                    dm._data = data
-                    if hasattr(dm, "current_index"):
-                        dm.current_index.update()
-                        logger.debug("In-place display_model update successful")
-                        return True
+            # Trigger display refresh. We try multiple approaches for compatibility
+            # across ndv versions:
+            #
+            # 1. _request_data() - directly requests fresh data (preferred)
+            # 2. display_model.current_index.update() - triggers index change event
+            #    which in turn calls _on_model_current_index_changed -> _request_data
+            #
+            # The update() call on the evented dict triggers change notifications
+            # even if no values actually change, causing a refresh.
 
-            logger.debug("No compatible in-place update path found")
+            # Try direct _request_data first (most reliable)
+            if hasattr(v, "_request_data") and callable(v._request_data):
+                v._request_data()
+                logger.debug("In-place update successful via _request_data()")
+                return True
+
+            # Fallback: trigger via current_index.update()
+            display_model = getattr(v, "display_model", None)
+            if display_model is not None:
+                current_index = getattr(display_model, "current_index", None)
+                if current_index is not None and hasattr(current_index, "update"):
+                    # update() on evented dict triggers change notifications
+                    current_index.update()
+                    logger.debug("In-place update successful via current_index.update()")
+                    return True
+
+            logger.debug("No compatible refresh trigger found")
             return False
 
         except Exception as e:
