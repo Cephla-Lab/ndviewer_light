@@ -1100,6 +1100,12 @@ class LightweightViewer(QWidget):
         # Skip swap if shape unchanged to prevent flicker during file writes
         old_data = self._xarray_data
         if old_data is not None and data.shape == old_data.shape:
+            # Close unused handles from the newly loaded data we're discarding
+            for h in data.attrs.get("_open_tifs", []):
+                try:
+                    h.close()
+                except Exception as e:
+                    logger.debug("Failed to close unused TiffFile handle: %s", e)
             return
 
         # Swap dataset, keeping OME handles alive for the new data
