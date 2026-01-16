@@ -1027,58 +1027,74 @@ class LightweightViewer(QWidget):
         )
 
     def _try_inplace_ndv_update(self, data: "xr.DataArray") -> bool:
-        """Best-effort no-flicker data swap for ndv, depending on installed ndv version."""
+        """Best-effort no-flicker data swap for ndv, avoiding memory leaks.
+
+        IMPORTANT: This method avoids using ndv's data property setter because it
+        leaks GPU handles (see https://github.com/pyapp-kit/ndv/issues/209).
+        Instead, we update the underlying data wrapper directly and trigger a
+        display refresh, which bypasses the leaky code path.
+
+        For shape-compatible updates (same dimensions), this is both faster and
+        leak-free. For shape changes, we return False to trigger a full viewer
+        rebuild (unavoidable until ndv fixes the upstream issue).
+        """
         v = self.ndv_viewer
         if v is None:
             return False
 
-        # Try common APIs across versions.
-        candidates = [
-            ("set_data", True),
-            ("setData", True),
-            ("set_array", True),
-            ("setArray", True),
-        ]
-        for name, is_call in candidates:
-            attr = getattr(v, name, None)
-            if callable(attr):
-                try:
-                    attr(data)
-                    return True
-                except Exception:
-                    pass
+        # Check shape compatibility - we can only do true in-place update if shapes match
+        try:
+            old_data = getattr(v, "data", None)
+            if old_data is None:
+                return False
 
-        # Try common attribute assignment patterns.
-        for prop in ["data", "array"]:
-            if hasattr(v, prop):
-                try:
-                    setattr(v, prop, data)
-                    return True
-                except Exception:
-                    pass
+            old_shape = getattr(old_data, "shape", None)
+            new_shape = getattr(data, "shape", None)
 
-        # Some viewers tuck the model under .viewer or .model
-        for inner_name in ["viewer", "model"]:
-            inner = getattr(v, inner_name, None)
-            if inner is None:
-                continue
-            for name in ["set_data", "setData", "set_array", "setArray"]:
-                fn = getattr(inner, name, None)
-                if callable(fn):
-                    try:
-                        fn(data)
+            if old_shape is None or new_shape is None:
+                return False
+
+            if old_shape != new_shape:
+                # Shape changed - must rebuild viewer (will leak, but unavoidable)
+                logger.debug(
+                    "Shape changed %s -> %s, cannot do in-place update",
+                    old_shape,
+                    new_shape,
+                )
+                return False
+
+            # Shapes match - update the data wrapper directly to avoid the leaky setter.
+            # The ndv ArrayViewer uses a DataWrapper internally. We update it directly
+            # and then trigger a display refresh via current_index.update().
+            if hasattr(v, "_data_wrapper") and v._data_wrapper is not None:
+                wrapper = v._data_wrapper
+                # Update the wrapper's internal data reference
+                if hasattr(wrapper, "_data"):
+                    wrapper._data = data
+                    # Trigger display refresh without recreating GPU handles
+                    if hasattr(v, "display_model") and hasattr(
+                        v.display_model, "current_index"
+                    ):
+                        v.display_model.current_index.update()
+                        logger.debug("In-place data wrapper update successful")
                         return True
-                    except Exception:
-                        pass
-            for prop in ["data", "array"]:
-                if hasattr(inner, prop):
-                    try:
-                        setattr(inner, prop, data)
-                        return True
-                    except Exception:
-                        pass
 
-        return False
+            # Fallback: try display_model.data if available (some ndv versions)
+            if hasattr(v, "display_model"):
+                dm = v.display_model
+                if hasattr(dm, "_data"):
+                    dm._data = data
+                    if hasattr(dm, "current_index"):
+                        dm.current_index.update()
+                        logger.debug("In-place display_model update successful")
+                        return True
+
+            logger.debug("No compatible in-place update path found")
+            return False
+
+        except Exception as e:
+            logger.debug("In-place update failed: %s", e)
+            return False
 
     def _maybe_refresh(self):
         if not LAZY_LOADING_AVAILABLE:
