@@ -178,7 +178,8 @@ def main() -> int:
     if not args.no_launch:
         viewer_cmd = [
             sys.executable,
-            str(Path(__file__).parent / "ndviewer_light.py"),
+            "-m",
+            "ndviewer_light",
             str(root),
         ]
         print("Launching viewer:", " ".join(viewer_cmd))

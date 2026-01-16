@@ -924,13 +924,17 @@ class LightweightViewer(QWidget):
         self._refresh_timer.timeout.connect(self._maybe_refresh)
         self._refresh_timer.start()
 
-    def _close_open_handles(self):
-        """Close mmap TiffFile handles (OME path) from the previously loaded dataset."""
-        for h in getattr(self, "_open_handles", []) or []:
+    def _close_tiff_handles(self, handles):
+        """Close a list of TiffFile handles, logging any errors."""
+        for h in handles or []:
             try:
                 h.close()
             except Exception as e:
                 logger.debug("Failed to close TiffFile handle: %s", e)
+
+    def _close_open_handles(self):
+        """Close mmap TiffFile handles (OME path) from the previously loaded dataset."""
+        self._close_tiff_handles(getattr(self, "_open_handles", []))
         self._open_handles = []
 
     def closeEvent(self, event):
@@ -1091,15 +1095,23 @@ class LightweightViewer(QWidget):
             return
         if sig == self._last_sig:
             return
-        self._last_sig = sig
 
         data = self._create_lazy_array(Path(self.dataset_path))
         if data is None:
             return
 
+        # Skip swap if shape unchanged to prevent flicker during file writes
+        old_data = self._xarray_data
+        if old_data is not None and data.shape == old_data.shape:
+            # Close unused handles from the newly loaded data we're discarding
+            self._close_tiff_handles(data.attrs.get("_open_tifs", []))
+            return
+
+        # Update signature only after we've confirmed we'll swap data
+        self._last_sig = sig
+
         # Swap dataset, keeping OME handles alive for the new data
         old_handles = getattr(self, "_open_handles", [])
-        old_data = self._xarray_data
         self._xarray_data = data
         self._open_handles = data.attrs.get("_open_tifs", [])
 
@@ -1113,11 +1125,7 @@ class LightweightViewer(QWidget):
             # Update channel labels for the new data
             self._initiate_channel_label_update()
             # Close old handles after successful swap.
-            for h in old_handles or []:
-                try:
-                    h.close()
-                except Exception as e:
-                    logger.debug("Failed to close old handle: %s", e)
+            self._close_tiff_handles(old_handles)
             return
 
         # Fallback: rebuild widget (may be visible on some platforms). Reduce flicker a bit.
@@ -1127,11 +1135,7 @@ class LightweightViewer(QWidget):
         finally:
             self.setUpdatesEnabled(True)
             # Close old handles regardless.
-            for h in old_handles or []:
-                try:
-                    h.close()
-                except Exception as e:
-                    logger.debug("Failed to close old handle: %s", e)
+            self._close_tiff_handles(old_handles)
 
     def _data_structure_changed(
         self, old_data: Optional["xr.DataArray"], new_data: "xr.DataArray"
