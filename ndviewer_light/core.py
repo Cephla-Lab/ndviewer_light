@@ -1095,7 +1095,6 @@ class LightweightViewer(QWidget):
             return
         if sig == self._last_sig:
             return
-        self._last_sig = sig
 
         data = self._create_lazy_array(Path(self.dataset_path))
         if data is None:
@@ -1107,6 +1106,9 @@ class LightweightViewer(QWidget):
             # Close unused handles from the newly loaded data we're discarding
             self._close_tiff_handles(data.attrs.get("_open_tifs", []))
             return
+
+        # Update signature only after we've confirmed we'll swap data
+        self._last_sig = sig
 
         # Swap dataset, keeping OME handles alive for the new data
         old_handles = getattr(self, "_open_handles", [])
