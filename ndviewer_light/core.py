@@ -1102,8 +1102,10 @@ class LightweightViewer(QWidget):
             current_index = (
                 getattr(display_model, "current_index", None) if display_model else None
             )
-            has_index_update = current_index is not None and hasattr(
-                current_index, "update"
+            has_index_update = (
+                current_index is not None
+                and hasattr(current_index, "update")
+                and callable(current_index.update)
             )
 
             if not has_request_data and not has_index_update:
