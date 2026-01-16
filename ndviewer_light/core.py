@@ -10,23 +10,20 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
-
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
-
-
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
+    QApplication,
+    QFileDialog,
     QLabel,
     QMainWindow,
-    QFileDialog,
-    QApplication,
     QStyleFactory,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QPalette, QColor
 
 if TYPE_CHECKING:
     import xarray as xr
@@ -188,10 +185,11 @@ except ImportError:
 
 # Lazy loading
 try:
+    from functools import lru_cache
+
+    import dask.array as da
     import tifffile as tf
     import xarray as xr
-    import dask.array as da
-    from functools import lru_cache
     from scipy.ndimage import zoom as ndimage_zoom
 
     LAZY_LOADING_AVAILABLE = True
@@ -207,8 +205,9 @@ CHANNEL_LABEL_UPDATE_RETRY_DELAY_MS = 100
 
 # Register custom DataWrapper for automatic 3D downsampling
 if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
-    from ndv.models._data_wrapper import XarrayWrapper
     from collections.abc import Mapping
+
+    from ndv.models._data_wrapper import XarrayWrapper
 
     class Downsampling3DXarrayWrapper(XarrayWrapper):
         """XarrayWrapper that automatically downsamples 3D volumes for OpenGL.
@@ -250,7 +249,7 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
                         cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE
                         return cls._cached_max_texture_size
 
-                    from OpenGL.GL import glGetIntegerv, GL_MAX_3D_TEXTURE_SIZE
+                    from OpenGL.GL import GL_MAX_3D_TEXTURE_SIZE, glGetIntegerv
 
                     limit = glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE)
                     cls._cached_max_texture_size = int(limit)

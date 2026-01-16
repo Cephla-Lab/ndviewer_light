@@ -13,7 +13,6 @@ Tests use mocks to avoid Qt/ndv dependencies while verifying:
 
 from unittest.mock import MagicMock, PropertyMock
 
-
 DEFAULT_SHAPE = (10, 100, 100)
 
 
@@ -161,7 +160,7 @@ class TestInplaceUpdate:
         assert result is False
 
     def test_returns_false_when_wrapper_has_no_data(self):
-        """Returns False when wrapper has no _data attribute."""
+        """Returns False when wrapper has neither _data nor data attribute."""
         viewer = create_mock_viewer()
         ndv_viewer = MagicMock()
         data_model = MagicMock()

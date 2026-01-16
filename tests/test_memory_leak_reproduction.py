@@ -10,11 +10,12 @@ The test simulates the live refresh scenario where data is updated
 every 750ms during acquisition.
 
 Usage:
-    python tests/test_memory_leak_reproduction.py [--iterations N] [--old-code]
+    python tests/test_memory_leak_reproduction.py [--iterations N] [--old-code] [--compare]
 
 Options:
     --iterations N   Number of refresh cycles to simulate (default: 100)
     --old-code       Use the old leaky code path for comparison
+    --compare        Run both old and new code paths and show comparison
 """
 
 import argparse
