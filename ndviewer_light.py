@@ -1039,6 +1039,13 @@ class LightweightViewer(QWidget):
         if data is None:
             return
 
+        # Only swap data if dimensions actually changed
+        # This prevents flicker when files are being written but shape is the same
+        old_data = self._xarray_data
+        if old_data is not None and data.shape == old_data.shape:
+            # Dimensions unchanged - no need to swap and cause flicker
+            return
+
         # Swap dataset, keeping OME handles alive for the new data
         old_handles = getattr(self, "_open_handles", [])
         self._xarray_data = data
