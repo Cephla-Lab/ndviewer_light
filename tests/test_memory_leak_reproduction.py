@@ -163,25 +163,15 @@ def simulate_old_code_path(viewer, new_data):
 
 def simulate_new_code_path(viewer, new_data):
     """Simulate the NEW code that bypasses the setter (NO LEAK)."""
-    # This is what the fixed _try_inplace_ndv_update does:
-    # 1. Get wrapper via correct path
-    wrapper = viewer._data_model.data_wrapper
-    if wrapper is None:
+    try:
+        wrapper = viewer._data_model.data_wrapper
+        if wrapper._data is None or wrapper._data.shape != new_data.shape:
+            return False
+        wrapper._data = new_data
+        viewer._request_data()
+        return True
+    except Exception:
         return False
-
-    # 2. Check shapes match
-    old_shape = getattr(wrapper._data, "shape", None)
-    new_shape = getattr(new_data, "shape", None)
-    if old_shape != new_shape:
-        return False
-
-    # 3. Update wrapper._data directly (bypasses leaky setter)
-    wrapper._data = new_data
-
-    # 4. Trigger refresh
-    viewer._request_data()
-
-    return True
 
 
 def run_memory_test(iterations, use_old_code, data_shape=(1, 1, 5, 3, 256, 256)):
