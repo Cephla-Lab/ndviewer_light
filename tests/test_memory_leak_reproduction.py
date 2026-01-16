@@ -297,6 +297,16 @@ def run_memory_test(iterations, use_old_code, data_shape=(1, 1, 5, 3, 256, 256))
 
 
 def main():
+    """Entry point for the memory leak reproduction script.
+
+    Parses command-line arguments and runs the appropriate test mode:
+    - Default: Run with new (fixed) code path
+    - --old-code: Run with old (leaky) code path
+    - --compare: Run both and show comparison
+
+    Returns:
+        int: Exit code (0=success, 1=leak detected, 2=test issue)
+    """
     parser = argparse.ArgumentParser(description="Memory leak reproduction test")
     parser.add_argument(
         "--iterations",

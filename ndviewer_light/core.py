@@ -1064,15 +1064,10 @@ class LightweightViewer(QWidget):
 
             # Check shape compatibility - we can only do in-place update if shapes match.
             # Track which attribute path we used for reading so we write to the same one.
-            if (
-                hasattr(wrapper, "_data")
-                and getattr(wrapper, "_data", None) is not None
-            ):
+            if getattr(wrapper, "_data", None) is not None:
                 old_data = wrapper._data
                 data_attr = "_data"
-            elif (
-                hasattr(wrapper, "data") and getattr(wrapper, "data", None) is not None
-            ):
+            elif getattr(wrapper, "data", None) is not None:
                 old_data = wrapper.data
                 data_attr = "data"
             else:
