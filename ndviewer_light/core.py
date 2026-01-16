@@ -1097,9 +1097,13 @@ class LightweightViewer(QWidget):
         if data is None:
             return
 
+        # Skip swap if shape unchanged to prevent flicker during file writes
+        old_data = self._xarray_data
+        if old_data is not None and data.shape == old_data.shape:
+            return
+
         # Swap dataset, keeping OME handles alive for the new data
         old_handles = getattr(self, "_open_handles", [])
-        old_data = self._xarray_data
         self._xarray_data = data
         self._open_handles = data.attrs.get("_open_tifs", [])
 
