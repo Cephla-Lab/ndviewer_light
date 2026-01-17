@@ -58,18 +58,17 @@ class TestInplaceUpdate:
         assert wrapper._data is new_data
         ndv_viewer._request_data.assert_called_once()
 
-    def test_returns_false_on_shape_mismatch(self):
-        """Returns False when shapes don't match."""
+    def test_succeeds_on_shape_change(self):
+        """Succeeds even when shapes differ (ndv handles shape changes)."""
         viewer = create_mock_viewer()
         ndv_viewer, wrapper = setup_ndv_viewer(viewer)
-        old_data = wrapper._data
 
-        new_data = create_mock_data(shape=(20, 100, 100))
+        new_data = create_mock_data(shape=(20, 100, 100))  # Different shape
         result = viewer._try_inplace_ndv_update(new_data)
 
-        assert result is False
-        assert wrapper._data is old_data  # unchanged
-        ndv_viewer._request_data.assert_not_called()
+        assert result is True
+        assert wrapper._data is new_data
+        ndv_viewer._request_data.assert_called_once()
 
     def test_returns_false_when_ndv_viewer_is_none(self):
         """Returns False when ndv_viewer is None."""

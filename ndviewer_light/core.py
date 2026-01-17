@@ -1041,7 +1041,7 @@ class LightweightViewer(QWidget):
 
         try:
             wrapper = v._data_model.data_wrapper
-            if wrapper._data is None or wrapper._data.shape != data.shape:
+            if wrapper._data is None:
                 return False
 
             wrapper._data = data
