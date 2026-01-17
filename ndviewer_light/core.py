@@ -1045,7 +1045,7 @@ class LightweightViewer(QWidget):
 
         Note:
             Relies on ndv internal APIs (_data_model.data_wrapper._data).
-            May need updating if ndv internals change.
+            Tested with ndv 0.4.0. May need updating if ndv internals change.
         """
         v = self.ndv_viewer
         if v is None:
