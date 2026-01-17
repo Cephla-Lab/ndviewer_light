@@ -3,6 +3,12 @@ Unit tests for _try_inplace_ndv_update() method in LightweightViewer.
 
 This method bypasses ndv's leaky data setter to avoid GPU memory leaks
 during live refresh (see https://github.com/pyapp-kit/ndv/issues/209).
+
+Tests cover:
+- Successful same-shape updates (calls _request_data)
+- Shape-change updates (emits dims_changed signal)
+- Graceful failure when ndv_viewer or wrapper._data is None
+- Exception handling and fallback behavior
 """
 
 from unittest.mock import MagicMock
@@ -47,7 +53,7 @@ class TestInplaceUpdate:
     """Tests for _try_inplace_ndv_update()."""
 
     def test_success(self):
-        """Updates data and calls _request_data when shapes match."""
+        """Verify successful in-place update calls _request_data for same-shape data."""
         viewer = create_mock_viewer()
         ndv_viewer, wrapper = setup_ndv_viewer(viewer)
 
@@ -104,16 +110,31 @@ class TestInplaceUpdate:
 
         assert result is False
 
-    def test_returns_false_on_exception(self):
-        """Returns False when an exception occurs."""
+    def test_returns_false_on_request_data_exception(self):
+        """Returns False when _request_data raises an exception."""
         viewer = create_mock_viewer()
         ndv_viewer = MagicMock()
         ndv_viewer._data_model = MagicMock()
         ndv_viewer._data_model.data_wrapper = MagicMock()
         ndv_viewer._data_model.data_wrapper._data = create_mock_data()
-        ndv_viewer._request_data.side_effect = RuntimeError("test")
+        ndv_viewer._request_data.side_effect = RuntimeError("request_data error")
         viewer.ndv_viewer = ndv_viewer
 
         result = viewer._try_inplace_ndv_update(create_mock_data())
+
+        assert result is False
+
+    def test_returns_false_on_dims_changed_emit_exception(self):
+        """Returns False when dims_changed.emit() raises an exception.
+
+        This covers the shape-change code path where dims_changed is emitted
+        instead of _request_data.
+        """
+        viewer = create_mock_viewer()
+        ndv_viewer, wrapper = setup_ndv_viewer(viewer)
+        wrapper.dims_changed.emit.side_effect = RuntimeError("signal error")
+
+        new_data = create_mock_data(shape=(20, 100, 100))  # Different shape triggers emit
+        result = viewer._try_inplace_ndv_update(new_data)
 
         assert result is False
