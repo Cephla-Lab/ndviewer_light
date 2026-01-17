@@ -58,23 +58,23 @@ class TestInplaceUpdate:
         assert wrapper._data is new_data
         ndv_viewer._request_data.assert_called_once()
 
-    def test_returns_false_on_shape_change(self):
-        """Returns False when shapes differ (forces full rebuild for UI update).
+    def test_emits_dims_changed_on_shape_change(self):
+        """Emits dims_changed signal when shapes differ to update sliders.
 
-        When data shape changes (e.g., new timepoint), ndv needs a full rebuild
-        to update sliders and UI controls. In-place update only refreshes the
-        visible slice without updating dimension sliders.
+        When data shape changes (e.g., new timepoint), we update the data
+        in-place and emit dims_changed to trigger slider updates without
+        rebuilding the entire viewer.
         """
         viewer = create_mock_viewer()
         ndv_viewer, wrapper = setup_ndv_viewer(viewer)
-        old_data = wrapper._data
 
         new_data = create_mock_data(shape=(20, 100, 100))  # Different shape
         result = viewer._try_inplace_ndv_update(new_data)
 
-        assert result is False
-        assert wrapper._data is old_data  # Data not swapped
-        ndv_viewer._request_data.assert_not_called()
+        assert result is True
+        assert wrapper._data is new_data  # Data swapped
+        wrapper.dims_changed.emit.assert_called_once()
+        ndv_viewer._request_data.assert_not_called()  # dims_changed triggers sync instead
 
     def test_returns_false_when_ndv_viewer_is_none(self):
         """Returns False when ndv_viewer is None."""

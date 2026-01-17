@@ -1032,8 +1032,11 @@ class LightweightViewer(QWidget):
     def _try_inplace_ndv_update(self, data: "xr.DataArray") -> bool:
         """Update ndv data in-place to avoid memory leak (ndv#209).
 
-        Bypasses ndv's data setter which leaks GPU handles. Returns False
-        if update fails, triggering a full rebuild by the caller.
+        Bypasses ndv's data setter which leaks GPU handles. When the data
+        shape changes, emits dims_changed to trigger slider updates without
+        rebuilding the entire viewer.
+
+        Returns False if update fails, triggering a full rebuild by the caller.
         """
         v = self.ndv_viewer
         if v is None:
@@ -1041,11 +1044,19 @@ class LightweightViewer(QWidget):
 
         try:
             wrapper = v._data_model.data_wrapper
-            if wrapper._data is None or wrapper._data.shape != data.shape:
+            if wrapper._data is None:
                 return False
 
+            shape_changed = wrapper._data.shape != data.shape
             wrapper._data = data
-            v._request_data()
+
+            if shape_changed:
+                # Emit dims_changed to trigger _fully_synchronize_view()
+                # which updates slider ranges without full viewer rebuild
+                wrapper.dims_changed.emit()
+            else:
+                v._request_data()
+
             return True
         except Exception:
             return False
