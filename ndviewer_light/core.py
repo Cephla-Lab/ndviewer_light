@@ -1066,17 +1066,11 @@ class LightweightViewer(QWidget):
         if data is None:
             return
 
-        # Skip swap if shape unchanged to prevent flicker during file writes
-        old_data = self._xarray_data
-        if old_data is not None and data.shape == old_data.shape:
-            # Close unused handles from the newly loaded data we're discarding
-            self._close_tiff_handles(data.attrs.get("_open_tifs", []))
-            return
-
         # Update signature only after we've confirmed we'll swap data
         self._last_sig = sig
 
         # Swap dataset, keeping OME handles alive for the new data
+        old_data = self._xarray_data
         old_handles = getattr(self, "_open_handles", [])
         self._xarray_data = data
         self._open_handles = data.attrs.get("_open_tifs", [])
