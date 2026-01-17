@@ -130,7 +130,9 @@ class TestInplaceUpdate:
         ndv_viewer, wrapper = setup_ndv_viewer(viewer)
         wrapper.dims_changed.emit.side_effect = RuntimeError("signal error")
 
-        new_data = create_mock_data(shape=(20, 100, 100))  # Different shape triggers emit
+        new_data = create_mock_data(
+            shape=(20, 100, 100)
+        )  # Different shape triggers emit
         result = viewer._try_inplace_ndv_update(new_data)
 
         assert result is False

@@ -1118,7 +1118,9 @@ class LightweightViewer(QWidget):
             return
 
         # Fallback: rebuild widget (may be visible on some platforms). Reduce flicker a bit.
-        reason = "Data structure changed" if structure_changed else "In-place update failed"
+        reason = (
+            "Data structure changed" if structure_changed else "In-place update failed"
+        )
         logger.debug("%s, performing full viewer rebuild", reason)
 
         try:

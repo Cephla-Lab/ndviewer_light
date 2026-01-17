@@ -104,7 +104,9 @@ class MockArrayViewer:
 
     def __init__(self, initial_data, use_leaky_setter=True):
         self.use_leaky_setter = use_leaky_setter
-        self._data_model = type("DataModel", (), {"data_wrapper": MockDataWrapper(initial_data)})()
+        self._data_model = type(
+            "DataModel", (), {"data_wrapper": MockDataWrapper(initial_data)}
+        )()
         self._leaked_handles = []
         self._request_data_called = False
 
