@@ -1036,7 +1036,16 @@ class LightweightViewer(QWidget):
         shape changes, emits dims_changed to trigger slider updates without
         rebuilding the entire viewer.
 
-        Returns False if update fails, triggering a full rebuild by the caller.
+        Args:
+            data: The new xarray DataArray to display.
+
+        Returns:
+            True if in-place update succeeded, False if caller should
+            fall back to _set_ndv_data() for a full viewer rebuild.
+
+        Note:
+            Relies on ndv internal APIs (_data_model.data_wrapper._data).
+            May need updating if ndv internals change.
         """
         v = self.ndv_viewer
         if v is None:
@@ -1051,14 +1060,23 @@ class LightweightViewer(QWidget):
             wrapper._data = data
 
             if shape_changed:
-                # Emit dims_changed to trigger _fully_synchronize_view()
-                # which updates slider ranges without full viewer rebuild
+                # Emit dims_changed signal to update slider ranges without full rebuild.
+                # In ndv, this signal triggers _fully_synchronize_view() which recreates
+                # sliders based on the new data shape.
                 wrapper.dims_changed.emit()
             else:
                 v._request_data()
 
             return True
-        except Exception:
+        except AttributeError as e:
+            # Expected when ndv version doesn't have the expected internal structure
+            logger.debug("In-place update unavailable (ndv API mismatch): %s", e)
+            return False
+        except Exception as e:
+            # Unexpected error - log for debugging but allow fallback
+            logger.warning(
+                "In-place ndv update failed unexpectedly: %s", e, exc_info=True
+            )
             return False
 
     def _maybe_refresh(self):
@@ -1100,6 +1118,11 @@ class LightweightViewer(QWidget):
             return
 
         # Fallback: rebuild widget (may be visible on some platforms). Reduce flicker a bit.
+        if structure_changed:
+            logger.debug("Data structure changed, performing full viewer rebuild")
+        else:
+            logger.debug("In-place update failed, performing full viewer rebuild")
+
         try:
             self.setUpdatesEnabled(False)
             self._set_ndv_data(data)
