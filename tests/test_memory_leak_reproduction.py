@@ -43,11 +43,14 @@ def create_test_data(shape=(1, 1, 10, 3, 512, 512), iteration=0):
     """Create xarray-like test data simulating acquisition frames.
 
     Shape: (time, fov, z, channel, height, width)
-    Each iteration creates slightly different data to simulate new frames.
 
     Args:
-        shape: Array shape tuple
-        iteration: Used as random seed for reproducible test data
+        shape: Array shape tuple (default matches typical acquisition layout).
+        iteration: Random seed for reproducible but distinct data per iteration.
+
+    Returns:
+        MagicMock: Mock xarray DataArray with shape, dtype, dims, attrs,
+        and a backing numpy array for realistic memory usage simulation.
     """
     # Create a mock xarray DataArray with the essential attributes
     data = MagicMock()
@@ -65,11 +68,25 @@ def create_test_data(shape=(1, 1, 10, 3, 512, 512), iteration=0):
     return data
 
 
+class MockSignal:
+    """Mock psygnal Signal for testing."""
+
+    def __init__(self):
+        self._emit_count = 0
+
+    def emit(self):
+        self._emit_count += 1
+
+
 class MockDataWrapper:
-    """Mock ndv DataWrapper that simulates the real wrapper behavior."""
+    """Mock ndv DataWrapper that simulates the real wrapper behavior.
+
+    Includes a dims_changed signal to match the real wrapper's interface.
+    """
 
     def __init__(self, data):
         self._data = data
+        self.dims_changed = MockSignal()
 
     @property
     def data(self):
@@ -88,18 +105,15 @@ class MockArrayViewer:
 
     When use_leaky_setter=True, setting .data creates new internal
     objects without cleaning up old ones (simulating the GPU handle leak).
-    When use_leaky_setter=False, we use the workaround path.
+    When use_leaky_setter=False, the data setter updates the wrapper
+    in-place without creating new objects (no leak).
     """
 
     def __init__(self, initial_data, use_leaky_setter=True):
         self.use_leaky_setter = use_leaky_setter
         self._data_model = MockDataModel()
         self._data_model.data_wrapper = MockDataWrapper(initial_data)
-
-        # Simulate accumulated GPU handles (the leak)
         self._leaked_handles = []
-
-        # For the workaround path
         self._request_data_called = False
 
     @property
@@ -162,13 +176,26 @@ def simulate_old_code_path(viewer, new_data):
 
 
 def simulate_new_code_path(viewer, new_data):
-    """Simulate the NEW code that bypasses the setter (NO LEAK)."""
+    """Simulate the NEW code that bypasses the setter (NO LEAK).
+
+    This matches the actual _try_inplace_ndv_update implementation:
+    - Directly updates wrapper._data (bypasses leaky setter)
+    - Emits dims_changed when shape changes (updates sliders)
+    - Calls _request_data when shape unchanged (refreshes display)
+    """
     try:
         wrapper = viewer._data_model.data_wrapper
-        if wrapper._data is None or wrapper._data.shape != new_data.shape:
+        if wrapper._data is None:
             return False
+
+        shape_changed = wrapper._data.shape != new_data.shape
         wrapper._data = new_data
-        viewer._request_data()
+
+        if shape_changed:
+            wrapper.dims_changed.emit()
+        else:
+            viewer._request_data()
+
         return True
     except Exception:
         return False
