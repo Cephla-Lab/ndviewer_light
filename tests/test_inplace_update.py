@@ -113,12 +113,8 @@ class TestInplaceUpdate:
     def test_returns_false_on_request_data_exception(self):
         """Returns False when _request_data raises an exception."""
         viewer = create_mock_viewer()
-        ndv_viewer = MagicMock()
-        ndv_viewer._data_model = MagicMock()
-        ndv_viewer._data_model.data_wrapper = MagicMock()
-        ndv_viewer._data_model.data_wrapper._data = create_mock_data()
+        ndv_viewer, _ = setup_ndv_viewer(viewer)
         ndv_viewer._request_data.side_effect = RuntimeError("request_data error")
-        viewer.ndv_viewer = ndv_viewer
 
         result = viewer._try_inplace_ndv_update(create_mock_data())
 

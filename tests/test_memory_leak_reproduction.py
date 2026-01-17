@@ -93,13 +93,6 @@ class MockDataWrapper:
         return self._data
 
 
-class MockDataModel:
-    """Mock ndv _data_model."""
-
-    def __init__(self):
-        self.data_wrapper = None
-
-
 class MockArrayViewer:
     """Mock ndv ArrayViewer that simulates the memory leak behavior.
 
@@ -111,8 +104,7 @@ class MockArrayViewer:
 
     def __init__(self, initial_data, use_leaky_setter=True):
         self.use_leaky_setter = use_leaky_setter
-        self._data_model = MockDataModel()
-        self._data_model.data_wrapper = MockDataWrapper(initial_data)
+        self._data_model = type("DataModel", (), {"data_wrapper": MockDataWrapper(initial_data)})()
         self._leaked_handles = []
         self._request_data_called = False
 
@@ -156,14 +148,11 @@ class MockArrayViewer:
 
     def get_leaked_memory_mb(self):
         """Estimate memory held by leaked handles."""
-        total_bytes = 0
-        for handle in self._leaked_handles:
-            if handle.get("old_data") is not None:
-                arr = getattr(handle["old_data"], "_backing_array", None)
-                if arr is not None:
-                    total_bytes += arr.nbytes
-            if handle.get("texture_handle") is not None:
-                total_bytes += handle["texture_handle"].nbytes
+        total_bytes = sum(
+            getattr(h.get("old_data"), "_backing_array", np.array([])).nbytes
+            + getattr(h.get("texture_handle"), "nbytes", 0)
+            for h in self._leaked_handles
+        )
         return total_bytes / 1024 / 1024
 
 
@@ -390,25 +379,20 @@ def main():
             return 2
     else:
         results = run_memory_test(args.iterations, use_old_code=args.old_code)
+        leaked = results["leaked_handle_count"] > 0
 
         if args.old_code:
-            if results["leaked_handle_count"] > 0:
-                print(
-                    f"⚠️  LEAK DETECTED: {results['leaked_handle_count']} handles leaked"
-                )
-                return 1
+            if leaked:
+                print(f"LEAK DETECTED: {results['leaked_handle_count']} handles leaked")
             else:
-                print("✅ No leak detected (unexpected for old code)")
-                return 0
+                print("No leak detected (unexpected for old code)")
+            return 1 if leaked else 0
         else:
-            if results["leaked_handle_count"] == 0:
-                print("✅ No leak detected (fix working correctly)")
-                return 0
-            else:
-                print(
-                    f"❌ LEAK DETECTED: {results['leaked_handle_count']} handles leaked"
-                )
+            if leaked:
+                print(f"LEAK DETECTED: {results['leaked_handle_count']} handles leaked")
                 return 1
+            print("No leak detected (fix working correctly)")
+            return 0
 
 
 if __name__ == "__main__":
