@@ -10,23 +10,20 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
-
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
-
-
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
+    QApplication,
+    QFileDialog,
     QLabel,
     QMainWindow,
-    QFileDialog,
-    QApplication,
     QStyleFactory,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QPalette, QColor
 
 if TYPE_CHECKING:
     import xarray as xr
@@ -188,10 +185,11 @@ except ImportError:
 
 # Lazy loading
 try:
+    from functools import lru_cache
+
+    import dask.array as da
     import tifffile as tf
     import xarray as xr
-    import dask.array as da
-    from functools import lru_cache
     from scipy.ndimage import zoom as ndimage_zoom
 
     LAZY_LOADING_AVAILABLE = True
@@ -207,8 +205,9 @@ CHANNEL_LABEL_UPDATE_RETRY_DELAY_MS = 100
 
 # Register custom DataWrapper for automatic 3D downsampling
 if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
-    from ndv.models._data_wrapper import XarrayWrapper
     from collections.abc import Mapping
+
+    from ndv.models._data_wrapper import XarrayWrapper
 
     class Downsampling3DXarrayWrapper(XarrayWrapper):
         """XarrayWrapper that automatically downsamples 3D volumes for OpenGL.
@@ -250,7 +249,7 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
                         cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE
                         return cls._cached_max_texture_size
 
-                    from OpenGL.GL import glGetIntegerv, GL_MAX_3D_TEXTURE_SIZE
+                    from OpenGL.GL import GL_MAX_3D_TEXTURE_SIZE, glGetIntegerv
 
                     limit = glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE)
                     cls._cached_max_texture_size = int(limit)
@@ -1031,58 +1030,54 @@ class LightweightViewer(QWidget):
         )
 
     def _try_inplace_ndv_update(self, data: "xr.DataArray") -> bool:
-        """Best-effort no-flicker data swap for ndv, depending on installed ndv version."""
+        """Update ndv data in-place to avoid memory leak (ndv#209).
+
+        Bypasses ndv's data setter which leaks GPU handles. When the data
+        shape changes, emits dims_changed to trigger slider updates without
+        rebuilding the entire viewer.
+
+        Args:
+            data: The new xarray DataArray to display.
+
+        Returns:
+            True if in-place update succeeded, False if caller should
+            fall back to _set_ndv_data() for a full viewer rebuild.
+
+        Note:
+            Relies on ndv internal APIs (_data_model.data_wrapper._data).
+            Tested with ndv 0.4.0. May need updating if ndv internals change.
+        """
         v = self.ndv_viewer
         if v is None:
             return False
 
-        # Try common APIs across versions.
-        candidates = [
-            ("set_data", True),
-            ("setData", True),
-            ("set_array", True),
-            ("setArray", True),
-        ]
-        for name, is_call in candidates:
-            attr = getattr(v, name, None)
-            if callable(attr):
-                try:
-                    attr(data)
-                    return True
-                except Exception:
-                    pass
+        try:
+            wrapper = v._data_model.data_wrapper
+            if wrapper._data is None:
+                return False
 
-        # Try common attribute assignment patterns.
-        for prop in ["data", "array"]:
-            if hasattr(v, prop):
-                try:
-                    setattr(v, prop, data)
-                    return True
-                except Exception:
-                    pass
+            shape_changed = wrapper._data.shape != data.shape
+            wrapper._data = data
 
-        # Some viewers tuck the model under .viewer or .model
-        for inner_name in ["viewer", "model"]:
-            inner = getattr(v, inner_name, None)
-            if inner is None:
-                continue
-            for name in ["set_data", "setData", "set_array", "setArray"]:
-                fn = getattr(inner, name, None)
-                if callable(fn):
-                    try:
-                        fn(data)
-                        return True
-                    except Exception:
-                        pass
-            for prop in ["data", "array"]:
-                if hasattr(inner, prop):
-                    try:
-                        setattr(inner, prop, data)
-                        return True
-                    except Exception:
-                        pass
+            if shape_changed:
+                # Emit dims_changed signal to update slider ranges without full rebuild.
+                # In ndv, this signal triggers _fully_synchronize_view() which recreates
+                # sliders based on the new data shape.
+                wrapper.dims_changed.emit()
+            else:
+                v._request_data()
 
-        return False
+            return True
+        except AttributeError as e:
+            # Expected when ndv version doesn't have the expected internal structure
+            logger.debug("In-place update unavailable (ndv API mismatch): %s", e)
+            return False
+        except Exception as e:
+            # Unexpected error - log for debugging but allow fallback
+            logger.warning(
+                "In-place ndv update failed unexpectedly: %s", e, exc_info=True
+            )
+            return False
 
     def _maybe_refresh(self):
         if not LAZY_LOADING_AVAILABLE:
@@ -1100,17 +1095,11 @@ class LightweightViewer(QWidget):
         if data is None:
             return
 
-        # Skip swap if shape unchanged to prevent flicker during file writes
-        old_data = self._xarray_data
-        if old_data is not None and data.shape == old_data.shape:
-            # Close unused handles from the newly loaded data we're discarding
-            self._close_tiff_handles(data.attrs.get("_open_tifs", []))
-            return
-
         # Update signature only after we've confirmed we'll swap data
         self._last_sig = sig
 
         # Swap dataset, keeping OME handles alive for the new data
+        old_data = self._xarray_data
         old_handles = getattr(self, "_open_handles", [])
         self._xarray_data = data
         self._open_handles = data.attrs.get("_open_tifs", [])
@@ -1129,6 +1118,11 @@ class LightweightViewer(QWidget):
             return
 
         # Fallback: rebuild widget (may be visible on some platforms). Reduce flicker a bit.
+        reason = (
+            "Data structure changed" if structure_changed else "In-place update failed"
+        )
+        logger.debug("%s, performing full viewer rebuild", reason)
+
         try:
             self.setUpdatesEnabled(False)
             self._set_ndv_data(data)
