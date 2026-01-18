@@ -305,6 +305,78 @@ def run_memory_test(iterations, use_old_code, data_shape=(1, 1, 5, 3, 256, 256))
     return results
 
 
+def run_comparison_test(iterations):
+    """Run both old and new code paths and compare results.
+
+    Returns:
+        int: Exit code (0=success, 1=new code leaks, 2=old code didn't leak)
+    """
+    print("\n" + "=" * 70)
+    print("COMPARISON TEST: Old Code vs New Code")
+    print("=" * 70)
+
+    old_results = run_memory_test(iterations, use_old_code=True)
+    new_results = run_memory_test(iterations, use_old_code=False)
+
+    # Summary comparison
+    print("\n" + "=" * 70)
+    print("COMPARISON SUMMARY")
+    print("=" * 70)
+    print(f"{'Metric':<30} {'Old Code':<20} {'New Code':<20}")
+    print("-" * 70)
+    print(
+        f"{'Leaked handles':<30} {old_results['leaked_handle_count']:<20} {new_results['leaked_handle_count']:<20}"
+    )
+    print(
+        f"{'Leaked memory (MB)':<30} {old_results['leaked_memory_mb']:<20.1f} {new_results['leaked_memory_mb']:<20.1f}"
+    )
+    print(
+        f"{'Peak traced memory (MB)':<30} {old_results['peak_traced_mb']:<20.1f} {new_results['peak_traced_mb']:<20.1f}"
+    )
+    print("-" * 70)
+
+    old_leaked = old_results["leaked_handle_count"] > 0
+    new_leaked = new_results["leaked_handle_count"] > 0
+
+    if old_leaked and not new_leaked:
+        print("\nSUCCESS: New code eliminates the memory leak!")
+        print(
+            f"   Old code leaked {old_results['leaked_handle_count']} handles ({old_results['leaked_memory_mb']:.1f}MB)"
+        )
+        print("   New code leaked 0 handles (0.0MB)")
+        return 0
+    if new_leaked:
+        print("\nFAILURE: New code still leaks memory!")
+        return 1
+    print("\nWARNING: Old code didn't leak (test may not be working correctly)")
+    return 2
+
+
+def run_single_test(iterations, use_old_code):
+    """Run a single test with either old or new code path.
+
+    Returns:
+        int: Exit code (0=no leak/expected leak, 1=unexpected result)
+    """
+    results = run_memory_test(iterations, use_old_code=use_old_code)
+    leaked = results["leaked_handle_count"] > 0
+
+    if use_old_code:
+        # For old code, we expect leaks
+        if leaked:
+            print(f"LEAK DETECTED: {results['leaked_handle_count']} handles leaked")
+        else:
+            print("No leak detected (unexpected for old code)")
+        return 0 if leaked else 1
+    else:
+        # For new code, we expect no leaks
+        if leaked:
+            print(f"LEAK DETECTED: {results['leaked_handle_count']} handles leaked")
+            return 1
+        print("No leak detected (fix working correctly)")
+        return 0
+
+
 def main():
     """Entry point for the memory leak reproduction script.
 
@@ -334,67 +406,8 @@ def main():
     args = parser.parse_args()
 
     if args.compare:
-        print("\n" + "=" * 70)
-        print("COMPARISON TEST: Old Code vs New Code")
-        print("=" * 70)
-
-        # Run with old code
-        old_results = run_memory_test(args.iterations, use_old_code=True)
-
-        # Run with new code
-        new_results = run_memory_test(args.iterations, use_old_code=False)
-
-        # Summary comparison
-        print("\n" + "=" * 70)
-        print("COMPARISON SUMMARY")
-        print("=" * 70)
-        print(f"{'Metric':<30} {'Old Code':<20} {'New Code':<20}")
-        print("-" * 70)
-        print(
-            f"{'Leaked handles':<30} {old_results['leaked_handle_count']:<20} {new_results['leaked_handle_count']:<20}"
-        )
-        print(
-            f"{'Leaked memory (MB)':<30} {old_results['leaked_memory_mb']:<20.1f} {new_results['leaked_memory_mb']:<20.1f}"
-        )
-        print(
-            f"{'Peak traced memory (MB)':<30} {old_results['peak_traced_mb']:<20.1f} {new_results['peak_traced_mb']:<20.1f}"
-        )
-        print("-" * 70)
-
-        if (
-            old_results["leaked_handle_count"] > 0
-            and new_results["leaked_handle_count"] == 0
-        ):
-            print("\n✅ SUCCESS: New code eliminates the memory leak!")
-            print(
-                f"   Old code leaked {old_results['leaked_handle_count']} handles ({old_results['leaked_memory_mb']:.1f}MB)"
-            )
-            print(f"   New code leaked 0 handles (0.0MB)")
-            return 0
-        elif new_results["leaked_handle_count"] > 0:
-            print("\n❌ FAILURE: New code still leaks memory!")
-            return 1
-        else:
-            print(
-                "\n⚠️  WARNING: Old code didn't leak (test may not be working correctly)"
-            )
-            return 2
-    else:
-        results = run_memory_test(args.iterations, use_old_code=args.old_code)
-        leaked = results["leaked_handle_count"] > 0
-
-        if args.old_code:
-            if leaked:
-                print(f"LEAK DETECTED: {results['leaked_handle_count']} handles leaked")
-            else:
-                print("No leak detected (unexpected for old code)")
-            return 1 if leaked else 0
-        else:
-            if leaked:
-                print(f"LEAK DETECTED: {results['leaked_handle_count']} handles leaked")
-                return 1
-            print("No leak detected (fix working correctly)")
-            return 0
+        return run_comparison_test(args.iterations)
+    return run_single_test(args.iterations, use_old_code=args.old_code)
 
 
 if __name__ == "__main__":
