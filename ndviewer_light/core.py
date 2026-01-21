@@ -9,8 +9,9 @@ import json
 import logging
 import re
 import sys
+from collections import OrderedDict
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
@@ -30,6 +31,7 @@ from PyQt5.QtWidgets import (
 # Try to import QIconifyIcon for NDV-style play buttons
 try:
     from superqt.iconify import QIconifyIcon
+
     ICONIFY_AVAILABLE = True
 except ImportError:
     ICONIFY_AVAILABLE = False
@@ -37,9 +39,11 @@ except ImportError:
 # Try to import QLabeledSlider from superqt (same as NDV uses)
 try:
     from superqt import QLabeledSlider
+
     SUPERQT_AVAILABLE = True
 except ImportError:
     from PyQt5.QtWidgets import QSlider
+
     SUPERQT_AVAILABLE = False
 
 # NDV slider style (matches NDV's internal sliders)
@@ -76,6 +80,7 @@ if TYPE_CHECKING:
 TIFF_EXTENSIONS = {".tif", ".tiff"}
 LIVE_REFRESH_INTERVAL_MS = 750
 SLIDER_PLAY_INTERVAL_MS = 500  # Animation interval for play buttons
+PLANE_CACHE_MAX_MEMORY_BYTES = 256 * 1024 * 1024  # 256MB for z-stack plane cache
 
 # Play button style (matches NDV's PlayButton)
 PLAY_BUTTON_STYLE = "QPushButton {border: none; padding: 0; margin: 0;}"
@@ -95,7 +100,61 @@ def _create_play_button(parent=None) -> QPushButton:
     btn.setStyleSheet(PLAY_BUTTON_STYLE)
     return btn
 
+
 logger = logging.getLogger(__name__)
+
+
+class MemoryBoundedLRUCache:
+    """Simple LRU cache with memory-based size limit.
+
+    Evicts least-recently-used entries when memory limit is exceeded.
+    Designed for caching large numpy arrays (image planes).
+    """
+
+    def __init__(self, max_memory_bytes: int):
+        self._max_memory = max_memory_bytes
+        self._current_memory = 0
+        self._cache: OrderedDict = OrderedDict()
+
+    def get(self, key: tuple) -> Optional[np.ndarray]:
+        """Get item from cache, marking it as recently used."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return None
+
+    def put(self, key: tuple, value: np.ndarray) -> None:
+        """Add item to cache, evicting LRU entries if needed."""
+        item_size = value.nbytes
+
+        # Don't cache if single item exceeds limit
+        if item_size > self._max_memory:
+            return
+
+        # Remove existing entry if present
+        if key in self._cache:
+            self._current_memory -= self._cache[key].nbytes
+            del self._cache[key]
+
+        # Evict LRU entries until we have room
+        while self._current_memory + item_size > self._max_memory and self._cache:
+            oldest_key, oldest_value = self._cache.popitem(last=False)
+            self._current_memory -= oldest_value.nbytes
+
+        self._cache[key] = value
+        self._current_memory += item_size
+
+    def clear(self) -> None:
+        """Clear all cached entries."""
+        self._cache.clear()
+        self._current_memory = 0
+
+    def __contains__(self, key: tuple) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
 
 # Module-level variable for voxel scale (used by monkey-patched add_volume)
 _current_voxel_scale: Optional[Tuple[float, float, float]] = None
@@ -970,8 +1029,7 @@ class LightweightViewer(QWidget):
         self._max_time_idx: int = 0  # Highest t seen (for slider range)
         self._image_height: int = 0
         self._image_width: int = 0
-        self._plane_cache: Dict[tuple, np.ndarray] = {}
-        self._plane_cache_maxsize: int = 16
+        self._plane_cache = MemoryBoundedLRUCache(PLANE_CACHE_MAX_MEMORY_BYTES)
         self._updating_sliders: bool = False  # Prevent recursive updates
         self._acquisition_active: bool = False  # True during live acquisition
         self._time_play_timer: Optional[QTimer] = None  # Timer for T slider animation
@@ -1030,6 +1088,7 @@ class LightweightViewer(QWidget):
             self._time_slider = QLabeledSlider(Qt.Horizontal)
         else:
             from PyQt5.QtWidgets import QSlider
+
             self._time_slider = QSlider(Qt.Horizontal)
         self._time_slider.setMinimum(0)
         self._time_slider.setMaximum(0)
@@ -1051,6 +1110,7 @@ class LightweightViewer(QWidget):
             self._fov_slider = QLabeledSlider(Qt.Horizontal)
         else:
             from PyQt5.QtWidgets import QSlider
+
             self._fov_slider = QSlider(Qt.Horizontal)
         self._fov_slider.setMinimum(0)
         self._fov_slider.setMaximum(0)
@@ -1153,6 +1213,18 @@ class LightweightViewer(QWidget):
             width: Image width in pixels
             fov_labels: FOV labels, e.g. ["A1:0", "A1:1", "A2:0"]
         """
+        # Stop any running play animations
+        if self._time_play_timer and self._time_play_timer.isActive():
+            self._time_play_timer.stop()
+            self._time_play_btn.setChecked(False)
+            if not ICONIFY_AVAILABLE:
+                self._time_play_btn.setText("▶")
+        if self._fov_play_timer and self._fov_play_timer.isActive():
+            self._fov_play_timer.stop()
+            self._fov_play_btn.setChecked(False)
+            if not ICONIFY_AVAILABLE:
+                self._fov_play_btn.setText("▶")
+
         # Clear previous state
         self._file_index.clear()
         self._plane_cache.clear()
@@ -1229,13 +1301,11 @@ class LightweightViewer(QWidget):
         self._xarray_data = xarr
         self._set_ndv_data(xarr)
 
-    def register_image(
-        self, t: int, fov_idx: int, z: int, channel: str, filepath: str
-    ):
+    def register_image(self, t: int, fov_idx: int, z: int, channel: str, filepath: str):
         """Register a newly saved image file.
 
         Thread-safe: can be called from worker thread.
-        Updates file index and slider ranges as needed.
+        Updates file index and emits signal for GUI update.
 
         Args:
             t: Timepoint index
@@ -1247,38 +1317,43 @@ class LightweightViewer(QWidget):
         # Update file index (dict operations are thread-safe in CPython)
         self._file_index[(t, fov_idx, z, channel)] = filepath
 
-        # Check if we need to update slider ranges
-        new_max_t = max(self._max_time_idx, t)
-        new_max_fov = max(len(self._fov_labels) - 1, fov_idx)
+        # Emit signal with raw indices - main thread computes max values
+        # to avoid race condition on _max_time_idx
+        self._image_registered.emit(t, fov_idx, 0, 0)
 
-        # Always emit signal to potentially update display for current FOV
-        self._image_registered.emit(t, fov_idx, new_max_t, new_max_fov)
-
-    def _on_image_registered(self, t: int, fov_idx: int, max_t: int, max_fov: int):
+    def _on_image_registered(self, t: int, fov_idx: int, _unused1: int, _unused2: int):
         """Handle image registration signal (runs on main thread).
 
         Updates slider ranges and auto-loads if image is for current FOV.
+        Note: _unused1/_unused2 are legacy parameters, max values computed here.
         """
-        # Update slider ranges if needed
-        self._updating_sliders = True
         try:
-            if max_t > self._max_time_idx:
-                self._max_time_idx = max_t
-                self._time_slider.setMaximum(max_t)
+            # Compute max values on main thread to avoid race condition
+            new_max_t = max(self._max_time_idx, t)
+            new_max_fov = max(len(self._fov_labels) - 1, fov_idx)
 
-            current_max_fov = self._fov_slider.maximum()
-            if max_fov > current_max_fov:
-                self._fov_slider.setMaximum(max_fov)
+            # Update slider ranges if needed
+            self._updating_sliders = True
+            try:
+                if new_max_t > self._max_time_idx:
+                    self._max_time_idx = new_max_t
+                    self._time_slider.setMaximum(new_max_t)
 
-            # Show T slider if we have multiple timepoints
-            if max_t > 0:
-                self._time_container.setVisible(True)
-        finally:
-            self._updating_sliders = False
+                current_max_fov = self._fov_slider.maximum()
+                if new_max_fov > current_max_fov:
+                    self._fov_slider.setMaximum(new_max_fov)
 
-        # Auto-load if this image is for the current FOV position
-        if t == self._current_time_idx and fov_idx == self._current_fov_idx:
-            self._load_current_fov()
+                # Show T slider if we have multiple timepoints
+                if new_max_t > 0:
+                    self._time_container.setVisible(True)
+            finally:
+                self._updating_sliders = False
+
+            # Auto-load if this image is for the current FOV position
+            if t == self._current_time_idx and fov_idx == self._current_fov_idx:
+                self._load_current_fov()
+        except Exception as e:
+            logger.error("Error in _on_image_registered: %s", e, exc_info=True)
 
     def load_fov(self, fov: int, t: Optional[int] = None, z: Optional[int] = None):
         """Load and display a specific FOV.
@@ -1302,7 +1377,9 @@ class LightweightViewer(QWidget):
             self._time_label.setText(f"T: {self._current_time_idx}")
             self._fov_slider.setValue(self._current_fov_idx)
             if self._current_fov_idx < len(self._fov_labels):
-                self._fov_label.setText(f"FOV: {self._fov_labels[self._current_fov_idx]}")
+                self._fov_label.setText(
+                    f"FOV: {self._fov_labels[self._current_fov_idx]}"
+                )
         finally:
             self._updating_sliders = False
 
@@ -1330,11 +1407,15 @@ class LightweightViewer(QWidget):
         try:
             flat_idx = self._fov_labels.index(target_label)
         except ValueError:
-            logger.debug(f"go_to_well_fov: label '{target_label}' not found in {self._fov_labels}")
+            logger.debug(
+                f"go_to_well_fov: label '{target_label}' not found in {self._fov_labels}"
+            )
             return False
 
         self.load_fov(flat_idx)
-        logger.info(f"go_to_well_fov: navigated to {target_label} (flat_idx={flat_idx})")
+        logger.info(
+            f"go_to_well_fov: navigated to {target_label} (flat_idx={flat_idx})"
+        )
         return True
 
     def is_push_mode_active(self) -> bool:
@@ -1371,8 +1452,9 @@ class LightweightViewer(QWidget):
                 cache_key = (t, fov_idx, z, channel)
 
                 # Check cache first
-                if cache_key in self._plane_cache:
-                    data[z_idx, c_idx] = self._plane_cache[cache_key]
+                cached_plane = self._plane_cache.get(cache_key)
+                if cached_plane is not None:
+                    data[z_idx, c_idx] = cached_plane
                     continue
 
                 # Load from file
@@ -1382,16 +1464,17 @@ class LightweightViewer(QWidget):
                         with tf.TiffFile(filepath) as tif:
                             plane = tif.pages[0].asarray()
                             data[z_idx, c_idx] = plane
-
-                            # Cache with simple eviction
-                            if len(self._plane_cache) >= self._plane_cache_maxsize:
-                                # Remove oldest entries
-                                keys = list(self._plane_cache.keys())
-                                for k in keys[: len(keys) // 2]:
-                                    del self._plane_cache[k]
-                            self._plane_cache[cache_key] = plane
+                            self._plane_cache.put(cache_key, plane)
                     except Exception as e:
-                        logger.debug("Failed to load plane %s: %s", filepath, e)
+                        logger.warning(
+                            "Failed to load image plane %s (t=%d, fov=%d, z=%d, ch=%s): %s",
+                            filepath,
+                            t,
+                            fov_idx,
+                            z,
+                            channel,
+                            e,
+                        )
 
         # Update NDV viewer data without rebuilding (preserves LUTs)
         self._update_ndv_data(data)
