@@ -1023,7 +1023,7 @@ class LightweightViewer(QWidget):
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
-        self._luts: Dict[int, any] = {}  # channel_idx -> colormap
+        self._luts: Dict[int, Any] = {}  # channel_idx -> colormap
         self._current_fov_idx: int = 0
         self._current_time_idx: int = 0
         self._max_time_idx: int = 0  # Highest t seen (for slider range)
@@ -1087,8 +1087,6 @@ class LightweightViewer(QWidget):
         if SUPERQT_AVAILABLE:
             self._time_slider = QLabeledSlider(Qt.Horizontal)
         else:
-            from PyQt5.QtWidgets import QSlider
-
             self._time_slider = QSlider(Qt.Horizontal)
         self._time_slider.setMinimum(0)
         self._time_slider.setMaximum(0)
@@ -1109,8 +1107,6 @@ class LightweightViewer(QWidget):
         if SUPERQT_AVAILABLE:
             self._fov_slider = QLabeledSlider(Qt.Horizontal)
         else:
-            from PyQt5.QtWidgets import QSlider
-
             self._fov_slider = QSlider(Qt.Horizontal)
         self._fov_slider.setMinimum(0)
         self._fov_slider.setMaximum(0)
@@ -1189,6 +1185,16 @@ class LightweightViewer(QWidget):
         next_val = (current + 1) % (max_fov + 1)
         self._fov_slider.setValue(next_val)
 
+    def _stop_play_animation(
+        self, timer: Optional[QTimer], button: QPushButton
+    ) -> None:
+        """Stop a play animation and reset the button state."""
+        if timer and timer.isActive():
+            timer.stop()
+            button.setChecked(False)
+            if not ICONIFY_AVAILABLE:
+                button.setText("▶")
+
     # ─────────────────────────────────────────────────────────────────────────
     # Push-based API for live acquisition
     # ─────────────────────────────────────────────────────────────────────────
@@ -1214,16 +1220,8 @@ class LightweightViewer(QWidget):
             fov_labels: FOV labels, e.g. ["A1:0", "A1:1", "A2:0"]
         """
         # Stop any running play animations
-        if self._time_play_timer and self._time_play_timer.isActive():
-            self._time_play_timer.stop()
-            self._time_play_btn.setChecked(False)
-            if not ICONIFY_AVAILABLE:
-                self._time_play_btn.setText("▶")
-        if self._fov_play_timer and self._fov_play_timer.isActive():
-            self._fov_play_timer.stop()
-            self._fov_play_btn.setChecked(False)
-            if not ICONIFY_AVAILABLE:
-                self._fov_play_btn.setText("▶")
+        self._stop_play_animation(self._time_play_timer, self._time_play_btn)
+        self._stop_play_animation(self._fov_play_timer, self._fov_play_btn)
 
         # Clear previous state
         self._file_index.clear()
