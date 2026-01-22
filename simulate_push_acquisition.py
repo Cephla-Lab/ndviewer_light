@@ -99,7 +99,7 @@ def _atomic_tiff_write(path: Path, image: np.ndarray) -> None:
         try:
             if tmp.exists():
                 tmp.unlink()
-        except Exception:
+        except OSError:
             pass  # Best effort cleanup
         raise
 

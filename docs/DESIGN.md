@@ -245,12 +245,13 @@ class Downsampling3DXarrayWrapper(XarrayWrapper):
 Z-step often differs from XY pixel size. Vispy VolumeVisual is patched to scale vertices:
 
 ```python
-# Patch applied at module load
+# Patch applied at module load (simplified pseudocode)
 def _patched_create_vertex_data(self):
+    ...  # existing setup code
     scale = getattr(self, "_voxel_scale", None)
     if scale:
         z0, z1 = -0.5 * scale[2], (shape[0] - 0.5) * scale[2]
-    # ... create scaled vertices
+        ...  # create scaled vertices using z0, z1
 ```
 
 ## Signal Flow
