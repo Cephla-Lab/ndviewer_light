@@ -135,6 +135,12 @@ class MemoryBoundedLRUCache:
 
         # Don't cache if single item exceeds limit
         if item_size > self._max_memory:
+            logger.debug(
+                "Cannot cache item (size %d bytes exceeds max %d bytes): key=%s",
+                item_size,
+                self._max_memory,
+                key,
+            )
             return
 
         with self._lock:
@@ -1168,6 +1174,11 @@ class LightweightViewer(QWidget):
             return
         if value != self._current_fov_idx:
             self._current_fov_idx = value
+            # Update FOV label with well:fov format if available
+            if self._fov_labels and value < len(self._fov_labels):
+                self._fov_label.setText(f"FOV: {self._fov_labels[value]}")
+            else:
+                self._fov_label.setText(f"FOV: {value}")
             self._load_current_fov()
 
     def _on_time_play_clicked(self, checked: bool):
@@ -1357,7 +1368,13 @@ class LightweightViewer(QWidget):
 
         # Emit signal with raw indices - main thread computes max values
         # to avoid race condition on _max_time_idx
-        self._image_registered.emit(t, fov_idx, 0, 0)
+        try:
+            self._image_registered.emit(t, fov_idx, 0, 0)
+        except RuntimeError as e:
+            # Qt object deleted - viewer was closed during acquisition
+            logger.warning(
+                "Could not emit image_registered signal (viewer may be closed): %s", e
+            )
 
     def _on_image_registered(self, t: int, fov_idx: int, _unused1: int, _unused2: int):
         """Handle image registration signal (runs on main thread).
@@ -1516,24 +1533,33 @@ class LightweightViewer(QWidget):
         # Load from file (lock protects concurrent access from dask workers)
         with self._file_index_lock:
             filepath = self._file_index.get(cache_key)
-        if filepath:
-            try:
-                with tf.TiffFile(filepath) as tif:
-                    plane = tif.pages[0].asarray()
-                    self._plane_cache.put(cache_key, plane)
-                    return plane
-            except Exception as e:
-                logger.warning(
-                    "Failed to load image plane %s (t=%d, fov=%d, z=%d, ch=%s): %s",
-                    filepath,
-                    t,
-                    fov_idx,
-                    z,
-                    channel,
-                    e,
-                )
 
-        # Return zeros if file not available
+        if not filepath:
+            # File not yet registered - expected during acquisition, not an error
+            return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+        try:
+            with tf.TiffFile(filepath) as tif:
+                plane = tif.pages[0].asarray()
+                self._plane_cache.put(cache_key, plane)
+                return plane
+        except FileNotFoundError:
+            logger.warning("Image file not found (may have been deleted): %s", filepath)
+        except PermissionError as e:
+            logger.error("Permission denied reading image %s: %s", filepath, e)
+        except Exception as e:
+            logger.error(
+                "Failed to load image plane %s (t=%d, fov=%d, z=%d, ch=%s): %s",
+                filepath,
+                t,
+                fov_idx,
+                z,
+                channel,
+                e,
+                exc_info=True,
+            )
+
+        # Return zeros on error - user sees black image
         return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
     def _load_current_fov(self):
@@ -1611,8 +1637,9 @@ class LightweightViewer(QWidget):
     def end_acquisition(self):
         """Mark acquisition as ended.
 
-        Call this when acquisition completes. The viewer remains usable
-        for navigating the acquired data.
+        Call this when acquisition completes. Clears push mode state so
+        is_push_mode_active() returns False. The viewer remains usable
+        for navigating the acquired data via file-based mode.
         """
         # Stop any pending debounced load from previous acquisition
         if self._load_debounce_timer and self._load_debounce_timer.isActive():
@@ -1620,6 +1647,8 @@ class LightweightViewer(QWidget):
         self._load_pending = False
 
         self._acquisition_active = False
+        # Clear FOV labels to exit push mode (is_push_mode_active() returns False)
+        self._fov_labels = []
         logger.info("NDViewer: Acquisition ended")
 
     # ─────────────────────────────────────────────────────────────────────────

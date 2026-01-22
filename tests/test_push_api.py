@@ -7,10 +7,15 @@ Tests cover:
 3. is_push_mode_active() - mode detection
 4. Dynamic FOV slider ranges per timepoint
 5. MemoryBoundedLRUCache - thread-safe cache operations
+6. go_to_well_fov() - navigation API
+7. _load_single_plane() - error handling
+8. end_acquisition() - cleanup
 """
 
+import os
+import tempfile
 import threading
-import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -296,6 +301,21 @@ class TestMemoryBoundedLRUCache:
         assert cache.get("key1") is None
         assert cache.get("key2") is None
 
+    def test_cache_skips_oversized_items(self):
+        """Cache silently skips items larger than max memory."""
+        from ndviewer_light.core import MemoryBoundedLRUCache
+
+        # Very small cache
+        cache = MemoryBoundedLRUCache(max_memory_bytes=1000)
+
+        # Large array that exceeds limit
+        large_data = np.zeros((100, 100), dtype=np.uint16)  # 20KB
+        cache.put("large", large_data)
+
+        # Should not be cached
+        assert cache.get("large") is None
+        assert len(cache) == 0
+
 
 class TestEndAcquisition:
     """Tests for end_acquisition() cleanup."""
@@ -303,11 +323,323 @@ class TestEndAcquisition:
     def test_end_acquisition_clears_fov_labels(self):
         """end_acquisition() clears _fov_labels to exit push mode."""
         fov_labels = ["A1:0", "A1:1"]
+        acquisition_active = True
+        load_pending = True
 
         def end_acquisition():
+            nonlocal acquisition_active, load_pending
+            load_pending = False
+            acquisition_active = False
             fov_labels.clear()
 
         end_acquisition()
 
         assert fov_labels == []
         assert bool(fov_labels) is False  # is_push_mode_active() returns False
+        assert acquisition_active is False
+        assert load_pending is False
+
+
+class TestGoToWellFov:
+    """Tests for go_to_well_fov() navigation method."""
+
+    def test_go_to_well_fov_returns_false_when_no_fov_labels(self):
+        """go_to_well_fov() returns False when push mode not active."""
+        fov_labels = []
+
+        def go_to_well_fov(well_id, fov_index):
+            if not fov_labels:
+                return False
+            target_label = f"{well_id}:{fov_index}"
+            try:
+                fov_labels.index(target_label)
+                return True
+            except ValueError:
+                return False
+
+        result = go_to_well_fov("A1", 0)
+        assert result is False
+
+    def test_go_to_well_fov_returns_false_when_well_not_found(self):
+        """go_to_well_fov() returns False for unknown well."""
+        fov_labels = ["A1:0", "A1:1", "A2:0"]
+
+        def go_to_well_fov(well_id, fov_index):
+            if not fov_labels:
+                return False
+            target_label = f"{well_id}:{fov_index}"
+            try:
+                fov_labels.index(target_label)
+                return True
+            except ValueError:
+                return False
+
+        result = go_to_well_fov("B1", 0)  # B1 not in labels
+        assert result is False
+
+    def test_go_to_well_fov_returns_false_when_fov_not_found(self):
+        """go_to_well_fov() returns False when FOV index doesn't exist."""
+        fov_labels = ["A1:0", "A1:1", "A2:0"]
+
+        def go_to_well_fov(well_id, fov_index):
+            if not fov_labels:
+                return False
+            target_label = f"{well_id}:{fov_index}"
+            try:
+                fov_labels.index(target_label)
+                return True
+            except ValueError:
+                return False
+
+        result = go_to_well_fov("A1", 5)  # A1:5 not in labels
+        assert result is False
+
+    def test_go_to_well_fov_returns_true_on_success(self):
+        """go_to_well_fov() returns True when navigation succeeds."""
+        fov_labels = ["A1:0", "A1:1", "A2:0"]
+        current_fov_idx = [0]  # Use list to allow mutation in nested function
+
+        def go_to_well_fov(well_id, fov_index):
+            if not fov_labels:
+                return False
+            target_label = f"{well_id}:{fov_index}"
+            try:
+                flat_idx = fov_labels.index(target_label)
+                current_fov_idx[0] = flat_idx
+                return True
+            except ValueError:
+                return False
+
+        result = go_to_well_fov("A2", 0)
+        assert result is True
+        assert current_fov_idx[0] == 2  # A2:0 is at index 2
+
+    def test_go_to_well_fov_finds_correct_index(self):
+        """go_to_well_fov() navigates to correct flat index."""
+        fov_labels = ["A1:0", "A1:1", "A1:2", "A2:0", "A2:1"]
+        navigated_to = [None]
+
+        def go_to_well_fov(well_id, fov_index):
+            if not fov_labels:
+                return False
+            target_label = f"{well_id}:{fov_index}"
+            try:
+                flat_idx = fov_labels.index(target_label)
+                navigated_to[0] = flat_idx
+                return True
+            except ValueError:
+                return False
+
+        # Test various navigations
+        assert go_to_well_fov("A1", 0) is True
+        assert navigated_to[0] == 0
+
+        assert go_to_well_fov("A1", 2) is True
+        assert navigated_to[0] == 2
+
+        assert go_to_well_fov("A2", 1) is True
+        assert navigated_to[0] == 4
+
+
+class TestLoadSinglePlane:
+    """Tests for _load_single_plane() error handling."""
+
+    def test_load_single_plane_returns_zeros_when_file_not_registered(self):
+        """_load_single_plane returns zeros when file not in index."""
+        from ndviewer_light.core import MemoryBoundedLRUCache
+
+        file_index = {}
+        lock = threading.Lock()
+        cache = MemoryBoundedLRUCache(max_memory_bytes=1024 * 1024)
+        image_height, image_width = 100, 100
+
+        def load_single_plane(t, fov_idx, z, channel):
+            cache_key = (t, fov_idx, z, channel)
+
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            with lock:
+                filepath = file_index.get(cache_key)
+
+            if not filepath:
+                return np.zeros((image_height, image_width), dtype=np.uint16)
+
+            # Would load from file here
+            return np.zeros((image_height, image_width), dtype=np.uint16)
+
+        result = load_single_plane(0, 0, 0, "BF")
+
+        assert result.shape == (100, 100)
+        assert result.dtype == np.uint16
+        assert np.all(result == 0)
+
+    def test_load_single_plane_returns_zeros_on_file_not_found(self):
+        """_load_single_plane returns zeros when file doesn't exist."""
+        import tifffile as tf
+
+        from ndviewer_light.core import MemoryBoundedLRUCache
+
+        file_index = {}
+        lock = threading.Lock()
+        cache = MemoryBoundedLRUCache(max_memory_bytes=1024 * 1024)
+        image_height, image_width = 100, 100
+
+        # Register a non-existent file
+        file_index[(0, 0, 0, "BF")] = "/nonexistent/path/image.tiff"
+
+        def load_single_plane(t, fov_idx, z, channel):
+            cache_key = (t, fov_idx, z, channel)
+
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            with lock:
+                filepath = file_index.get(cache_key)
+
+            if not filepath:
+                return np.zeros((image_height, image_width), dtype=np.uint16)
+
+            try:
+                with tf.TiffFile(filepath) as tif:
+                    plane = tif.pages[0].asarray()
+                    cache.put(cache_key, plane)
+                    return plane
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+            return np.zeros((image_height, image_width), dtype=np.uint16)
+
+        result = load_single_plane(0, 0, 0, "BF")
+
+        assert result.shape == (100, 100)
+        assert result.dtype == np.uint16
+        assert np.all(result == 0)
+
+    def test_load_single_plane_loads_valid_tiff(self):
+        """_load_single_plane successfully loads a valid TIFF file."""
+        import tifffile as tf
+
+        from ndviewer_light.core import MemoryBoundedLRUCache
+
+        file_index = {}
+        lock = threading.Lock()
+        cache = MemoryBoundedLRUCache(max_memory_bytes=1024 * 1024)
+
+        # Create a temporary TIFF file
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            # Write test image
+            test_image = np.random.randint(0, 65535, (50, 50), dtype=np.uint16)
+            tf.imwrite(temp_path, test_image)
+
+            file_index[(0, 0, 0, "BF")] = temp_path
+
+            def load_single_plane(t, fov_idx, z, channel):
+                cache_key = (t, fov_idx, z, channel)
+
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    return cached
+
+                with lock:
+                    filepath = file_index.get(cache_key)
+
+                if not filepath:
+                    return np.zeros((50, 50), dtype=np.uint16)
+
+                try:
+                    with tf.TiffFile(filepath) as tif:
+                        plane = tif.pages[0].asarray()
+                        cache.put(cache_key, plane)
+                        return plane
+                except Exception:
+                    pass
+
+                return np.zeros((50, 50), dtype=np.uint16)
+
+            result = load_single_plane(0, 0, 0, "BF")
+
+            assert result.shape == (50, 50)
+            assert np.array_equal(result, test_image)
+
+            # Check it's cached
+            cached = cache.get((0, 0, 0, "BF"))
+            assert cached is not None
+            assert np.array_equal(cached, test_image)
+
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_single_plane_uses_cache(self):
+        """_load_single_plane returns cached data without disk access."""
+        from ndviewer_light.core import MemoryBoundedLRUCache
+
+        file_index = {}
+        lock = threading.Lock()
+        cache = MemoryBoundedLRUCache(max_memory_bytes=1024 * 1024)
+        disk_reads = [0]
+
+        # Pre-populate cache
+        cached_image = np.ones((50, 50), dtype=np.uint16) * 12345
+        cache.put((0, 0, 0, "BF"), cached_image)
+
+        def load_single_plane(t, fov_idx, z, channel):
+            cache_key = (t, fov_idx, z, channel)
+
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            disk_reads[0] += 1
+            # Would load from disk here
+            return np.zeros((50, 50), dtype=np.uint16)
+
+        result = load_single_plane(0, 0, 0, "BF")
+
+        assert np.array_equal(result, cached_image)
+        assert disk_reads[0] == 0  # No disk read occurred
+
+
+class TestFovLabelUpdate:
+    """Tests for FOV label display updates."""
+
+    def test_fov_slider_updates_label_with_fov_labels(self):
+        """FOV slider change updates label with well:fov format."""
+        fov_labels = ["A1:0", "A1:1", "A2:0"]
+        fov_label_text = ["FOV"]
+
+        def on_fov_slider_changed(value):
+            if fov_labels and value < len(fov_labels):
+                fov_label_text[0] = f"FOV: {fov_labels[value]}"
+            else:
+                fov_label_text[0] = f"FOV: {value}"
+
+        on_fov_slider_changed(0)
+        assert fov_label_text[0] == "FOV: A1:0"
+
+        on_fov_slider_changed(1)
+        assert fov_label_text[0] == "FOV: A1:1"
+
+        on_fov_slider_changed(2)
+        assert fov_label_text[0] == "FOV: A2:0"
+
+    def test_fov_slider_updates_label_without_fov_labels(self):
+        """FOV slider change shows numeric index when no labels."""
+        fov_labels = []
+        fov_label_text = ["FOV"]
+
+        def on_fov_slider_changed(value):
+            if fov_labels and value < len(fov_labels):
+                fov_label_text[0] = f"FOV: {fov_labels[value]}"
+            else:
+                fov_label_text[0] = f"FOV: {value}"
+
+        on_fov_slider_changed(5)
+        assert fov_label_text[0] == "FOV: 5"

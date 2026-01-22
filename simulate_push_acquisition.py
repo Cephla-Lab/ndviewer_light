@@ -92,8 +92,17 @@ def _atomic_tiff_write(path: Path, image: np.ndarray) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tf.imwrite(str(tmp), image, photometric="minisblack")
-    os.replace(str(tmp), str(path))
+    try:
+        tf.imwrite(str(tmp), image, photometric="minisblack")
+        os.replace(str(tmp), str(path))
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass  # Best effort cleanup
+        raise
 
 
 class AcquisitionSimulator:
