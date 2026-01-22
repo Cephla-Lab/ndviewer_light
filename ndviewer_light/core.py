@@ -264,7 +264,9 @@ try:
                     dtype=np.float32,
                 )
 
-                indices = np.array([2, 6, 0, 4, 5, 6, 7, 2, 3, 0, 1, 5, 3, 7], dtype=np.uint32)
+                indices = np.array(
+                    [2, 6, 0, 4, 5, 6, 7, 2, 3, 0, 1, 5, 3, 7], dtype=np.uint32
+                )
 
                 self._vertices.set_data(pos)
                 self._index_buffer.set_data(indices)
@@ -300,7 +302,9 @@ try:
                                 margin=0.01,
                             )
                     except Exception as e:
-                        logger.warning("Failed to adjust camera for anisotropic voxels: %s", e)
+                        logger.warning(
+                            "Failed to adjust camera for anisotropic voxels: %s", e
+                        )
                 return handle
 
             VispyArrayCanvas.add_volume = _patched_add_volume
@@ -371,7 +375,9 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
                     # is set when a backend is actually loaded and initialized
                     backend = getattr(app, "_backend_module", None)
                     if backend is None:
-                        logger.debug("No vispy backend loaded - using fallback texture size")
+                        logger.debug(
+                            "No vispy backend loaded - using fallback texture size"
+                        )
                         cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE
                         return cls._cached_max_texture_size
 
@@ -458,7 +464,9 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
 
             return data
 
-        def _compute_simple_zoom_factors(self, dim_info: list, max_texture_size: int, spatial_z_names: set) -> tuple:
+        def _compute_simple_zoom_factors(
+            self, dim_info: list, max_texture_size: int, spatial_z_names: set
+        ) -> tuple:
             """Compute zoom factors for 3D volume downsampling.
 
             Strategy:
@@ -493,7 +501,9 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
 
 
 # Filename patterns (from common.py)
-FPATTERN = re.compile(r"(?P<r>[^_]+)_(?P<f>\d+)_(?P<z>\d+)_(?P<c>.+)\.tiff?", re.IGNORECASE)
+FPATTERN = re.compile(
+    r"(?P<r>[^_]+)_(?P<f>\d+)_(?P<z>\d+)_(?P<c>.+)\.tiff?", re.IGNORECASE
+)
 FPATTERN_OME = re.compile(r"(?P<r>[^_]+)_(?P<f>\d+)\.ome\.tiff?", re.IGNORECASE)
 
 
@@ -666,8 +676,14 @@ def read_acquisition_parameters(
 
             if sensor_pixel is not None and nominal_mag is not None and nominal_mag > 0:
                 # Compute actual magnification with tube lens correction
-                if tube_lens is not None and obj_tube_lens is not None and obj_tube_lens > 0:
-                    actual_mag = float(nominal_mag) * (float(tube_lens) / float(obj_tube_lens))
+                if (
+                    tube_lens is not None
+                    and obj_tube_lens is not None
+                    and obj_tube_lens > 0
+                ):
+                    actual_mag = float(nominal_mag) * (
+                        float(tube_lens) / float(obj_tube_lens)
+                    )
                 else:
                     actual_mag = float(nominal_mag)
                 computed = float(sensor_pixel) / actual_mag
@@ -802,7 +818,9 @@ def detect_format(base_path: Path) -> str:
         if any(".ome" in f.name for f in ome_dir.glob("*.tif*")):
             return "ome_tiff"
 
-    first_tp = next((d for d in base_path.iterdir() if d.is_dir() and d.name.isdigit()), None)
+    first_tp = next(
+        (d for d in base_path.iterdir() if d.is_dir() and d.name.isdigit()), None
+    )
     if first_tp:
         if any(".ome" in f.name for f in first_tp.glob("*.tif*")):
             return "ome_tiff"
@@ -826,7 +844,9 @@ def wavelength_to_colormap(wavelength: Optional[int]) -> str:
     return "gray"
 
 
-def data_structure_changed(old_data: Optional["xr.DataArray"], new_data: "xr.DataArray") -> bool:
+def data_structure_changed(
+    old_data: Optional["xr.DataArray"], new_data: "xr.DataArray"
+) -> bool:
     """Check if data structure changed significantly (requiring full viewer rebuild).
 
     This is a module-level utility function that detects changes in dimensions,
@@ -1004,7 +1024,9 @@ class LightweightViewer(QWidget):
         self._last_sig = None
         self._refresh_timer = None
         self._channel_label_generation = 0  # Generation counter for retry cancellation
-        self._pending_channel_label_retries = 0  # Retry counter for channel label updates
+        self._pending_channel_label_retries = (
+            0  # Retry counter for channel label updates
+        )
 
         # External navigation state (push-based API for live acquisition)
         # _file_index is accessed from both main thread and dask workers, needs lock
@@ -1027,7 +1049,9 @@ class LightweightViewer(QWidget):
         self._acquisition_active: bool = False  # True during live acquisition
         self._time_play_timer: Optional[QTimer] = None  # Timer for T slider animation
         self._fov_play_timer: Optional[QTimer] = None  # Timer for FOV slider animation
-        self._load_debounce_timer: Optional[QTimer] = None  # Debounce for _load_current_fov
+        self._load_debounce_timer: Optional[QTimer] = (
+            None  # Debounce for _load_current_fov
+        )
         self._load_pending: bool = False  # True if load is scheduled
 
         # Connect signal for thread-safe updates
@@ -1195,7 +1219,9 @@ class LightweightViewer(QWidget):
         next_val = (current + 1) % (max_fov + 1)
         self._fov_slider.setValue(next_val)
 
-    def _stop_play_animation(self, timer: Optional[QTimer], button: QPushButton) -> None:
+    def _stop_play_animation(
+        self, timer: Optional[QTimer], button: QPushButton
+    ) -> None:
         """Stop a play animation and reset the button state."""
         if timer and timer.isActive():
             timer.stop()
@@ -1248,7 +1274,10 @@ class LightweightViewer(QWidget):
         self._fov_labels = list(fov_labels)
 
         # Set up LUTs based on channel wavelengths
-        self._luts = {i: wavelength_to_colormap(extract_wavelength(c)) for i, c in enumerate(self._channel_names)}
+        self._luts = {
+            i: wavelength_to_colormap(extract_wavelength(c))
+            for i, c in enumerate(self._channel_names)
+        }
 
         # Reset navigation state
         self._current_fov_idx = 0
@@ -1276,7 +1305,8 @@ class LightweightViewer(QWidget):
         self._rebuild_viewer_for_acquisition()
 
         logger.info(
-            f"NDViewer: Started acquisition with {len(channels)} channels, " f"{num_z} z-levels, {len(fov_labels)} FOVs"
+            f"NDViewer: Started acquisition with {len(channels)} channels, "
+            f"{num_z} z-levels, {len(fov_labels)} FOVs"
         )
 
     def _rebuild_viewer_for_acquisition(self):
@@ -1417,7 +1447,9 @@ class LightweightViewer(QWidget):
             self._time_label.setText(f"T: {self._current_time_idx}")
             self._fov_slider.setValue(self._current_fov_idx)
             if self._current_fov_idx < len(self._fov_labels):
-                self._fov_label.setText(f"FOV: {self._fov_labels[self._current_fov_idx]}")
+                self._fov_label.setText(
+                    f"FOV: {self._fov_labels[self._current_fov_idx]}"
+                )
         finally:
             self._updating_sliders = False
 
@@ -1445,18 +1477,24 @@ class LightweightViewer(QWidget):
         try:
             flat_idx = self._fov_labels.index(target_label)
         except ValueError:
-            logger.debug(f"go_to_well_fov: label '{target_label}' not found in {self._fov_labels}")
+            logger.debug(
+                f"go_to_well_fov: label '{target_label}' not found in {self._fov_labels}"
+            )
             return False
 
         self.load_fov(flat_idx)
-        logger.info(f"go_to_well_fov: navigated to {target_label} (flat_idx={flat_idx})")
+        logger.info(
+            f"go_to_well_fov: navigated to {target_label} (flat_idx={flat_idx})"
+        )
         return True
 
     def is_push_mode_active(self) -> bool:
         """Check if push-based mode is active (has FOV labels configured)."""
         return bool(self._fov_labels)
 
-    def _load_single_plane(self, t: int, fov_idx: int, z: int, channel: str) -> np.ndarray:
+    def _load_single_plane(
+        self, t: int, fov_idx: int, z: int, channel: str
+    ) -> np.ndarray:
         """Load a single image plane from cache or disk.
 
         Args:
@@ -1527,7 +1565,9 @@ class LightweightViewer(QWidget):
             channel_planes = []
             for channel in self._channel_names:
                 # Create delayed load - no disk I/O happens here
-                delayed_load = dask.delayed(self._load_single_plane)(t, fov_idx, z, channel)
+                delayed_load = dask.delayed(self._load_single_plane)(
+                    t, fov_idx, z, channel
+                )
                 da_plane = da.from_delayed(delayed_load, shape=(h, w), dtype=np.uint16)
                 channel_planes.append(da_plane)
             # Stack channels: (n_c, h, w)
@@ -1658,7 +1698,11 @@ class LightweightViewer(QWidget):
             latest_file_count = 0
             try:
                 if latest_tp.exists():
-                    latest_file_count = sum(1 for f in latest_tp.iterdir() if f.suffix.lower() in TIFF_EXTENSIONS)
+                    latest_file_count = sum(
+                        1
+                        for f in latest_tp.iterdir()
+                        if f.suffix.lower() in TIFF_EXTENSIONS
+                    )
             except Exception as e:
                 logger.debug("Error counting files in latest timepoint: %s", e)
 
@@ -1667,7 +1711,9 @@ class LightweightViewer(QWidget):
         # ome_tiff
         ome_dir = base / "ome_tiff"
         if not ome_dir.exists():
-            ome_dir = next((d for d in base.iterdir() if d.is_dir() and d.name.isdigit()), base)
+            ome_dir = next(
+                (d for d in base.iterdir() if d.is_dir() and d.name.isdigit()), base
+            )
 
         ome_files = sorted(ome_dir.glob("*.ome.tif*"))
         n_ome = len(ome_files)
@@ -1747,7 +1793,9 @@ class LightweightViewer(QWidget):
             return False
         except Exception as e:
             # Unexpected error - log for debugging but allow fallback
-            logger.warning("In-place ndv update failed unexpectedly: %s", e, exc_info=True)
+            logger.warning(
+                "In-place ndv update failed unexpectedly: %s", e, exc_info=True
+            )
             return False
 
     def _maybe_refresh(self):
@@ -1789,7 +1837,9 @@ class LightweightViewer(QWidget):
             return
 
         # Fallback: rebuild widget (may be visible on some platforms). Reduce flicker a bit.
-        reason = "Data structure changed" if structure_changed else "In-place update failed"
+        reason = (
+            "Data structure changed" if structure_changed else "In-place update failed"
+        )
         logger.debug("%s, performing full viewer rebuild", reason)
 
         try:
@@ -1800,7 +1850,9 @@ class LightweightViewer(QWidget):
             # Close old handles regardless.
             self._close_tiff_handles(old_handles)
 
-    def _data_structure_changed(self, old_data: Optional["xr.DataArray"], new_data: "xr.DataArray") -> bool:
+    def _data_structure_changed(
+        self, old_data: Optional["xr.DataArray"], new_data: "xr.DataArray"
+    ) -> bool:
         """Check if data structure changed significantly (requiring full viewer rebuild).
 
         Delegates to the module-level :func:`data_structure_changed` function,
@@ -1891,7 +1943,9 @@ class LightweightViewer(QWidget):
                         logger.debug(f"set_current_index (fallback): {dim}={value}")
                         return True
 
-            logger.debug(f"set_current_index: dimension '{dim}' not found or API unavailable")
+            logger.debug(
+                f"set_current_index: dimension '{dim}' not found or API unavailable"
+            )
             return False
         except Exception as e:
             logger.debug(f"set_current_index error: {e}")
@@ -1983,7 +2037,9 @@ class LightweightViewer(QWidget):
 
         return [{"region": r, "fov": f} for r, f in sorted(fov_set)]
 
-    def _load_ome_tiff(self, base_path: Path, fovs: List[Dict]) -> Optional[xr.DataArray]:
+    def _load_ome_tiff(
+        self, base_path: Path, fovs: List[Dict]
+    ) -> Optional[xr.DataArray]:
         """Fast OME-TIFF: mmap via tifffile.aszarr, small chunks, no big graphs."""
         try:
             ome_dir = base_path / "ome_tiff"
@@ -2018,14 +2074,18 @@ class LightweightViewer(QWidget):
                         import xml.etree.ElementTree as ET
 
                         root = ET.fromstring(tif.ome_metadata)
-                        ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
+                        ns = {
+                            "ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"
+                        }
                         for ch in root.findall(".//ome:Channel", ns):
                             name = ch.get("Name") or ch.get("ID", "")
                             if name:
                                 channel_names.append(name)
 
                         # Extract physical pixel sizes
-                        pixel_size_x, pixel_size_y, pixel_size_z = extract_ome_physical_sizes(tif.ome_metadata)
+                        pixel_size_x, pixel_size_y, pixel_size_z = (
+                            extract_ome_physical_sizes(tif.ome_metadata)
+                        )
                 except Exception as e:
                     logger.debug("Failed to parse OME metadata: %s", e)
 
@@ -2041,7 +2101,10 @@ class LightweightViewer(QWidget):
             # Keep coordinates numeric (indices) for all axes, including "channel";
             # channel names are stored in attrs and applied via _lut_controllers.
             # This convention is used consistently for both OME-TIFF and single-TIFF paths.
-            coords_base = {axis_map.get(ax, f"ax_{ax}"): list(range(dim)) for ax, dim in zip(axes, shape)}
+            coords_base = {
+                axis_map.get(ax, f"ax_{ax}"): list(range(dim))
+                for ax, dim in zip(axes, shape)
+            }
 
             # Per-axis chunking: 1 for non-spatial, full for spatial
             chunks = []
@@ -2051,7 +2114,10 @@ class LightweightViewer(QWidget):
                 else:
                     chunks.append(1)
 
-            luts = {i: wavelength_to_colormap(extract_wavelength(name)) for i, name in enumerate(channel_names)}
+            luts = {
+                i: wavelength_to_colormap(extract_wavelength(name))
+                for i, name in enumerate(channel_names)
+            }
             n_fov = len(fovs)
 
             def open_zarr(path: str):
@@ -2066,7 +2132,9 @@ class LightweightViewer(QWidget):
                 region, fov = fovs[fov_idx]["region"], fovs[fov_idx]["fov"]
                 filepath = file_index.get((region, fov))
                 if not filepath:
-                    fov_arrays.append(da.zeros((n_t, n_z, n_c, height, width), dtype=np.uint16))
+                    fov_arrays.append(
+                        da.zeros((n_t, n_z, n_c, height, width), dtype=np.uint16)
+                    )
                     continue
                 tif, zarr_store = open_zarr(filepath)
                 tifs_kept.append(tif)
@@ -2117,7 +2185,9 @@ class LightweightViewer(QWidget):
             traceback.print_exc()
             return None
 
-    def _load_single_tiff(self, base_path: Path, fovs: List[Dict]) -> Optional[xr.DataArray]:
+    def _load_single_tiff(
+        self, base_path: Path, fovs: List[Dict]
+    ) -> Optional[xr.DataArray]:
         """Fast single-TIFF: per-plane on-demand loads with tiny LRU cache."""
         try:
             file_index = {}  # (t, region, fov, z, channel) -> filepath
@@ -2157,7 +2227,11 @@ class LightweightViewer(QWidget):
             )
 
             sample = next(
-                (p for p in file_index.values() if Path(p).suffix.lower() in TIFF_EXTENSIONS),
+                (
+                    p
+                    for p in file_index.values()
+                    if Path(p).suffix.lower() in TIFF_EXTENSIONS
+                ),
                 None,
             )
             if sample is None:
@@ -2169,7 +2243,10 @@ class LightweightViewer(QWidget):
                 logger.debug("Failed to read sample TIFF: %s", e)
                 return None
 
-            luts = {i: wavelength_to_colormap(extract_wavelength(c)) for i, c in enumerate(channel_names)}
+            luts = {
+                i: wavelength_to_colormap(extract_wavelength(c))
+                for i, c in enumerate(channel_names)
+            }
 
             @lru_cache(maxsize=128)
             def load_plane(t, region, fov, z, channel):
@@ -2205,8 +2282,12 @@ class LightweightViewer(QWidget):
                 plane = load_plane(t, region, fov, z, channel)
                 return plane.reshape(1, 1, 1, 1, height, width)
 
-            dummy = da.zeros((n_t, n_fov, n_z, n_c, height, width), chunks=chunks, dtype=np.uint16)
-            stacked = da.map_blocks(_block_loader, dummy, dtype=np.uint16, chunks=chunks)
+            dummy = da.zeros(
+                (n_t, n_fov, n_z, n_c, height, width), chunks=chunks, dtype=np.uint16
+            )
+            stacked = da.map_blocks(
+                _block_loader, dummy, dtype=np.uint16, chunks=chunks
+            )
 
             # Read acquisition parameters for pixel size and dz
             pixel_size_um, dz_um = read_acquisition_parameters(base_path)
@@ -2322,7 +2403,9 @@ class LightweightViewer(QWidget):
 
         remaining = self._pending_channel_label_retries
         if remaining <= 0:
-            logger.warning("Channel label update timed out - labels may show numeric indices")
+            logger.warning(
+                "Channel label update timed out - labels may show numeric indices"
+            )
             return
 
         # Check if _lut_controllers is available (indicates viewer is ready).
@@ -2377,7 +2460,9 @@ class LightweightViewer(QWidget):
                             name,
                         )
                     updated_names.append(name)
-            logger.debug("Updated %d channel labels: %s", len(updated_names), updated_names)
+            logger.debug(
+                "Updated %d channel labels: %s", len(updated_names), updated_names
+            )
         except Exception as e:
             logger.debug("Failed to update channel labels: %s", e)
 
