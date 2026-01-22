@@ -212,7 +212,7 @@ class TestMemoryBoundedLRUCache:
 
     def test_cache_basic_operations(self):
         """Cache supports get/put operations."""
-        from ndviewer_light.core import MemoryBoundedLRUCache
+        from ndviewer_light import MemoryBoundedLRUCache
 
         cache = MemoryBoundedLRUCache(max_memory_bytes=1024 * 1024)  # 1MB
 
@@ -225,7 +225,7 @@ class TestMemoryBoundedLRUCache:
 
     def test_cache_miss_returns_none(self):
         """Cache returns None for missing keys."""
-        from ndviewer_light.core import MemoryBoundedLRUCache
+        from ndviewer_light import MemoryBoundedLRUCache
 
         cache = MemoryBoundedLRUCache(max_memory_bytes=1024 * 1024)
 
@@ -235,7 +235,7 @@ class TestMemoryBoundedLRUCache:
 
     def test_cache_evicts_lru_when_full(self):
         """Cache evicts least-recently-used items when memory limit exceeded."""
-        from ndviewer_light.core import MemoryBoundedLRUCache
+        from ndviewer_light import MemoryBoundedLRUCache
 
         # Small cache that can hold ~2 arrays
         array_size = 100 * 100 * 2  # 20KB per array
@@ -256,7 +256,7 @@ class TestMemoryBoundedLRUCache:
 
     def test_cache_thread_safe(self):
         """Cache is thread-safe for concurrent access."""
-        from ndviewer_light.core import MemoryBoundedLRUCache
+        from ndviewer_light import MemoryBoundedLRUCache
 
         cache = MemoryBoundedLRUCache(max_memory_bytes=10 * 1024 * 1024)  # 10MB
         errors = []
@@ -290,7 +290,7 @@ class TestMemoryBoundedLRUCache:
 
     def test_cache_clear(self):
         """Cache clear() removes all items."""
-        from ndviewer_light.core import MemoryBoundedLRUCache
+        from ndviewer_light import MemoryBoundedLRUCache
 
         cache = MemoryBoundedLRUCache(max_memory_bytes=1024 * 1024)
 
@@ -303,7 +303,7 @@ class TestMemoryBoundedLRUCache:
 
     def test_cache_skips_oversized_items(self):
         """Cache silently skips items larger than max memory."""
-        from ndviewer_light.core import MemoryBoundedLRUCache
+        from ndviewer_light import MemoryBoundedLRUCache
 
         # Very small cache
         cache = MemoryBoundedLRUCache(max_memory_bytes=1000)
@@ -431,7 +431,7 @@ class _PlaneLoader:
     def __init__(self, height=100, width=100, load_from_disk=False):
         import tifffile as tf
 
-        from ndviewer_light.core import MemoryBoundedLRUCache
+        from ndviewer_light import MemoryBoundedLRUCache
 
         self.file_index = {}
         self.lock = threading.Lock()
