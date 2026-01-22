@@ -5,20 +5,42 @@ A lightweight viewer built on [NDV](https://github.com/pyapp-kit/ndv) for viewin
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      LightweightViewer                          │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │  T Slider   │  │ FOV Slider  │  │      NDV Viewer         │  │
-│  │  + Play     │  │  + Play     │  │  (vispy/OpenGL canvas)  │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-├─────────────────────────────────────────────────────────────────┤
-│                      Data Layer                                 │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │ File Index  │  │ Plane Cache │  │   Lazy Dask Arrays      │  │
-│  │ (dict+lock) │  │ (LRU+lock)  │  │   (on-demand loading)   │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         LightweightViewer                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                        UI Layer                                  │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │   │
+│  │  │  T Slider   │  │ FOV Slider  │  │      NDV Viewer         │  │   │
+│  │  │  + Play btn │  │  + Play btn │  │  (vispy/OpenGL canvas)  │  │   │
+│  │  └──────┬──────┘  └──────┬──────┘  └────────────┬────────────┘  │   │
+│  └─────────┼────────────────┼──────────────────────┼────────────────┘   │
+│            │                │                      │                    │
+│            ▼                ▼                      ▼                    │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                     Coordination Layer                           │   │
+│  │  - _on_time_slider_changed() / _on_fov_slider_changed()         │   │
+│  │  - _load_current_fov() creates lazy dask array                  │   │
+│  │  - _update_ndv_data() sends xarray to NDV                       │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                │                                        │
+│            ┌───────────────────┼───────────────────┐                    │
+│            ▼                   ▼                   ▼                    │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐         │
+│  │   File Index    │  │   Plane Cache   │  │  Lazy Loading   │         │
+│  │  (dict + lock)  │  │ (LRU + lock)    │  │  (dask.delayed) │         │
+│  │                 │  │  256MB limit    │  │                 │         │
+│  │ Key: (t,fov,z,c)│  │                 │  │ Only loads when │         │
+│  │ Val: filepath   │  │ Key: (t,fov,z,c)│  │ NDV displays    │         │
+│  └─────────────────┘  │ Val: np.ndarray │  └─────────────────┘         │
+│                       └─────────────────┘                               │
+└─────────────────────────────────────────────────────────────────────────┘
+
+Data Flow:
+1. Slider change → _load_current_fov() → creates dask array (no I/O)
+2. NDV requests slice → dask triggers _load_single_plane()
+3. _load_single_plane() checks cache → reads file if miss → caches result
 ```
 
 ## Two Operating Modes
@@ -287,7 +309,10 @@ Acquisition Worker Thread          Main Thread (Qt)
 
 ## File Format Support
 
-### Single-TIFF (Push Mode)
+The viewer supports two file formats. **Note:** File formats and operating modes are independent - either format can be used with either mode.
+
+### Single-TIFF Format
+One file per (well, fov, z, channel) combination:
 ```
 acquisition_folder/
 ├── 0/                          # timepoint
@@ -299,7 +324,8 @@ acquisition_folder/
     └── ...
 ```
 
-### OME-TIFF (File Mode)
+### OME-TIFF Format
+All z-planes and channels in one file per (well, fov):
 ```
 acquisition_folder/
 ├── 0/
@@ -308,6 +334,15 @@ acquisition_folder/
 └── 1/
     └── ...
 ```
+
+### Mode vs Format Matrix
+
+|                  | Single-TIFF | OME-TIFF |
+|------------------|-------------|----------|
+| **Push Mode**    | ✅ Tested    | ⚠️ Untested |
+| **File Mode**    | ✅ Tested    | ✅ Tested   |
+
+**Testing Status (PR #23):** This PR primarily tests single-TIFF with push mode. Other combinations may work but have not been validated in this PR.
 
 ## Performance Characteristics
 
