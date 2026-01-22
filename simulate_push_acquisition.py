@@ -59,7 +59,6 @@ def _draw_text(
     cursor_x = x
     cursor_y = y
     char_w = 5 * scale
-    char_h = 7 * scale
     spacing = 1 * scale
 
     for ch in text:
@@ -190,10 +189,8 @@ class AcquisitionSimulator:
         for z in range(self.n_z):
             for c, ch_name in enumerate(self.channels):
                 # Create image with identifying pattern
-                img = (self.base + np.uint16(t * 97 + fov * 11 + c * 301)).astype(
-                    np.uint16, copy=True
-                )
-                img = (img + np.uint16(z * 50)).astype(np.uint16)
+                offset = np.uint16(t * 97 + fov * 11 + c * 301 + z * 50)
+                img = (self.base + offset).astype(np.uint16, copy=True)
 
                 # Overlay text label
                 label = f"T={t:02d} F={fov} Z={z:02d} C={c}"
