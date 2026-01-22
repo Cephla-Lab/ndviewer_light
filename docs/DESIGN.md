@@ -59,12 +59,9 @@ When `start_acquisition()` is called, it populates `_fov_labels`, switching the 
 viewer.start_acquisition(
     channels=["BF", "DAPI", "GFP"],
     num_z=5,
-    image_height=2048,
-    image_width=2048,
+    height=2048,
+    width=2048,
     fov_labels=["A1:0", "A1:1", "A2:0"],  # well:fov format
-    pixel_size_um=0.5,
-    dz_um=2.0,
-    luts={0: "gray", 1: "blue", 2: "green"}
 )
 ```
 
@@ -102,6 +99,11 @@ Create lazy dask arrays that only load planes when NDV actually displays them:
 
 ```python
 def _load_current_fov(self):
+    # Get current position from instance state
+    t = self._current_time_idx
+    fov = self._current_fov_idx
+    h, w = self._image_height, self._image_width
+
     # Create lazy structure - no I/O here
     delayed_planes = []
     for z in self._z_levels:

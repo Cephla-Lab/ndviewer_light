@@ -1012,7 +1012,8 @@ class LightweightViewer(QWidget):
     """
 
     # Signal for thread-safe UI updates from register_image()
-    _image_registered = pyqtSignal(int, int, int, int)  # (t, fov_idx, max_t, max_fov)
+    # Signature: (t, fov_idx, _unused1, _unused2) - last two reserved for future use
+    _image_registered = pyqtSignal(int, int, int, int)
 
     dataset_path: str
     ndv_viewer: Optional["ndv.ArrayViewer"]
@@ -1163,6 +1164,14 @@ class LightweightViewer(QWidget):
                 if self._current_fov_idx > available_fov_max:
                     self._current_fov_idx = available_fov_max
                     self._fov_slider.setValue(available_fov_max)
+
+                # Update FOV label to reflect current FOV after any clamping
+                if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
+                    self._fov_label.setText(
+                        f"FOV: {self._fov_labels[self._current_fov_idx]}"
+                    )
+                else:
+                    self._fov_label.setText(f"FOV: {self._current_fov_idx}")
             finally:
                 self._updating_sliders = False
 
@@ -1380,7 +1389,10 @@ class LightweightViewer(QWidget):
         """Handle image registration signal (runs on main thread).
 
         Updates slider ranges and schedules debounced FOV load if needed.
-        Note: _unused1/_unused2 are legacy parameters, max values computed here.
+
+        Note: _unused1/_unused2 are placeholder parameters kept for signal
+        compatibility; max values are computed here from the current tracking
+        state (_max_time_idx, _max_fov_per_time), not passed via signal.
         """
         try:
             # Update per-timepoint max FOV tracking
@@ -1463,10 +1475,12 @@ class LightweightViewer(QWidget):
             self._time_slider.setValue(self._current_time_idx)
             self._time_label.setText(f"T: {self._current_time_idx}")
             self._fov_slider.setValue(self._current_fov_idx)
-            if self._current_fov_idx < len(self._fov_labels):
+            if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
                 self._fov_label.setText(
                     f"FOV: {self._fov_labels[self._current_fov_idx]}"
                 )
+            else:
+                self._fov_label.setText(f"FOV: {self._current_fov_idx}")
         finally:
             self._updating_sliders = False
 
@@ -1536,6 +1550,10 @@ class LightweightViewer(QWidget):
 
         if not filepath:
             # File not yet registered - expected during acquisition, not an error
+            return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+        if not LAZY_LOADING_AVAILABLE:
+            logger.error("tifffile not available for loading image planes")
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
