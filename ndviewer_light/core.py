@@ -1637,9 +1637,12 @@ class LightweightViewer(QWidget):
     def end_acquisition(self):
         """Mark acquisition as ended.
 
-        Call this when acquisition completes. Clears push mode state so
-        is_push_mode_active() returns False. The viewer remains usable
-        for navigating the acquired data via file-based mode.
+        Call this when acquisition completes. The viewer remains in push mode
+        (is_push_mode_active() returns True) so navigation via go_to_well_fov()
+        continues to work for browsing the acquired data.
+
+        FOV labels are preserved to enable navigation. They are only cleared
+        when a new acquisition starts via start_acquisition().
         """
         # Stop any pending debounced load from previous acquisition
         if self._load_debounce_timer and self._load_debounce_timer.isActive():
@@ -1647,8 +1650,8 @@ class LightweightViewer(QWidget):
         self._load_pending = False
 
         self._acquisition_active = False
-        # Clear FOV labels to exit push mode (is_push_mode_active() returns False)
-        self._fov_labels = []
+        # NOTE: _fov_labels is NOT cleared here - navigation must still work
+        # after acquisition ends. Labels are cleared in start_acquisition().
         logger.info("NDViewer: Acquisition ended")
 
     # ─────────────────────────────────────────────────────────────────────────

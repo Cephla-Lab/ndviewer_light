@@ -320,8 +320,8 @@ class TestMemoryBoundedLRUCache:
 class TestEndAcquisition:
     """Tests for end_acquisition() cleanup."""
 
-    def test_end_acquisition_clears_fov_labels(self):
-        """end_acquisition() clears _fov_labels to exit push mode."""
+    def test_end_acquisition_preserves_fov_labels(self):
+        """end_acquisition() preserves _fov_labels for post-acquisition navigation."""
         fov_labels = ["A1:0", "A1:1"]
         acquisition_active = True
         load_pending = True
@@ -330,14 +330,27 @@ class TestEndAcquisition:
             nonlocal acquisition_active, load_pending
             load_pending = False
             acquisition_active = False
-            fov_labels.clear()
+            # NOTE: fov_labels is NOT cleared - navigation must work after acquisition
 
         end_acquisition()
 
-        assert fov_labels == []
-        assert bool(fov_labels) is False  # is_push_mode_active() returns False
+        # FOV labels preserved for navigation
+        assert fov_labels == ["A1:0", "A1:1"]
+        assert bool(fov_labels) is True  # is_push_mode_active() returns True
         assert acquisition_active is False
         assert load_pending is False
+
+    def test_start_acquisition_clears_previous_fov_labels(self):
+        """start_acquisition() clears previous FOV labels before setting new ones."""
+        fov_labels = ["old:0", "old:1"]
+
+        def start_acquisition(new_labels):
+            fov_labels.clear()
+            fov_labels.extend(new_labels)
+
+        start_acquisition(["A1:0", "A2:0"])
+
+        assert fov_labels == ["A1:0", "A2:0"]
 
 
 def _go_to_well_fov(fov_labels, well_id, fov_index, navigated_to=None):
