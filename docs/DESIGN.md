@@ -5,42 +5,43 @@ A lightweight viewer built on [NDV](https://github.com/pyapp-kit/ndv) for viewin
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         LightweightViewer                               │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                        UI Layer                                  │   │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │   │
-│  │  │  T Slider   │  │ FOV Slider  │  │      NDV Viewer         │  │   │
-│  │  │  + Play btn │  │  + Play btn │  │  (vispy/OpenGL canvas)  │  │   │
-│  │  └──────┬──────┘  └──────┬──────┘  └────────────┬────────────┘  │   │
-│  └─────────┼────────────────┼──────────────────────┼────────────────┘   │
-│            │                │                      │                    │
-│            ▼                ▼                      ▼                    │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                     Coordination Layer                           │   │
-│  │  - _on_time_slider_changed() / _on_fov_slider_changed()         │   │
-│  │  - _load_current_fov() creates lazy dask array                  │   │
-│  │  - _update_ndv_data() sends xarray to NDV                       │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                │                                        │
-│            ┌───────────────────┼───────────────────┐                    │
-│            ▼                   ▼                   ▼                    │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐         │
-│  │   File Index    │  │   Plane Cache   │  │  Lazy Loading   │         │
-│  │  (dict + lock)  │  │ (LRU + lock)    │  │  (dask.delayed) │         │
-│  │                 │  │  256MB limit    │  │                 │         │
-│  │ Key: (t,fov,z,c)│  │                 │  │ Only loads when │         │
-│  │ Val: filepath   │  │ Key: (t,fov,z,c)│  │ NDV displays    │         │
-│  └─────────────────┘  │ Val: np.ndarray │  └─────────────────┘         │
-│                       └─────────────────┘                               │
-└─────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------+
+|                         LightweightViewer                             |
++-----------------------------------------------------------------------+
+|                                                                       |
+|   +---------------------------------------------------------------+   |
+|   |                         UI Layer                              |   |
+|   |  +-----------+   +-----------+   +-----------------------+    |   |
+|   |  | T Slider  |   |FOV Slider |   |     NDV Viewer        |    |   |
+|   |  | + Play    |   | + Play    |   | (vispy/OpenGL canvas) |    |   |
+|   |  +-----+-----+   +-----+-----+   +-----------+-----------+    |   |
+|   +--------|---------------|---------------------|----------------+   |
+|            |               |                     |                    |
+|            v               v                     v                    |
+|   +---------------------------------------------------------------+   |
+|   |                   Coordination Layer                          |   |
+|   |  - _on_time_slider_changed() / _on_fov_slider_changed()       |   |
+|   |  - _load_current_fov() creates lazy dask array                |   |
+|   |  - _update_ndv_data() sends xarray to NDV                     |   |
+|   +---------------------------------------------------------------+   |
+|                              |                                        |
+|            +-----------------+-----------------+                       |
+|            |                 |                 |                       |
+|            v                 v                 v                       |
+|   +-----------------+ +-----------------+ +-----------------+          |
+|   |   File Index    | |   Plane Cache   | |  Lazy Loading   |          |
+|   |  (dict + lock)  | |  (LRU + lock)   | | (dask.delayed)  |          |
+|   |                 | |   256MB limit   | |                 |          |
+|   | Key: (t,fov,z,c)| | Key: (t,fov,z,c)| | Only loads when |          |
+|   | Val: filepath   | | Val: np.ndarray | | NDV displays    |          |
+|   +-----------------+ +-----------------+ +-----------------+          |
+|                                                                       |
++-----------------------------------------------------------------------+
 
 Data Flow:
-1. Slider change → _load_current_fov() → creates dask array (no I/O)
-2. NDV requests slice → dask triggers _load_single_plane()
-3. _load_single_plane() checks cache → reads file if miss → caches result
+1. Slider change -> _load_current_fov() -> creates dask array (no I/O)
+2. NDV requests slice -> dask triggers _load_single_plane()
+3. _load_single_plane() checks cache -> reads file if miss -> caches result
 ```
 
 ## Two Operating Modes
