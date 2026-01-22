@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import sys
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -114,8 +115,6 @@ class MemoryBoundedLRUCache:
     """
 
     def __init__(self, max_memory_bytes: int):
-        import threading
-
         self._max_memory = max_memory_bytes
         self._current_memory = 0
         self._cache: OrderedDict = OrderedDict()
@@ -1037,8 +1036,6 @@ class LightweightViewer(QWidget):
 
         # External navigation state (push-based API for live acquisition)
         # _file_index is accessed from both main thread and dask workers, needs lock
-        import threading
-
         self._file_index: Dict[tuple, str] = {}  # (t, fov_idx, z, channel) -> filepath
         self._file_index_lock = threading.Lock()
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
