@@ -9,21 +9,70 @@ import json
 import logging
 import re
 import sys
+import threading
+from collections import OrderedDict
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
     QStyleFactory,
     QVBoxLayout,
     QWidget,
 )
+
+# Try to import QIconifyIcon for NDV-style play buttons
+try:
+    from superqt.iconify import QIconifyIcon
+
+    ICONIFY_AVAILABLE = True
+except ImportError:
+    ICONIFY_AVAILABLE = False
+
+# Try to import QLabeledSlider from superqt (same as NDV uses)
+try:
+    from superqt import QLabeledSlider
+
+    SUPERQT_AVAILABLE = True
+except ImportError:
+    from PyQt5.QtWidgets import QSlider
+
+    SUPERQT_AVAILABLE = False
+
+# NDV slider style (matches NDV's internal sliders)
+NDV_SLIDER_STYLE = """
+QSlider::groove:horizontal {
+    height: 15px;
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(128, 128, 128, 0.25),
+        stop:1 rgba(128, 128, 128, 0.1)
+    );
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    width: 38px;
+    background: #999999;
+    border-radius: 3px;
+}
+QSlider::sub-page:horizontal {
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(100, 100, 100, 0.25),
+        stop:1 rgba(100, 100, 100, 0.1)
+    );
+}
+QLabel { font-size: 12px; }
+SliderLabel { font-size: 10px; }
+"""
 
 if TYPE_CHECKING:
     import xarray as xr
@@ -31,8 +80,96 @@ if TYPE_CHECKING:
 # Constants
 TIFF_EXTENSIONS = {".tif", ".tiff"}
 LIVE_REFRESH_INTERVAL_MS = 750
+SLIDER_PLAY_INTERVAL_MS = 100  # Animation interval for play buttons
+PLANE_CACHE_MAX_MEMORY_BYTES = 256 * 1024 * 1024  # 256MB for z-stack plane cache
+
+# Play button style (matches NDV's PlayButton)
+PLAY_BUTTON_STYLE = "QPushButton {border: none; padding: 0; margin: 0;}"
+
+
+def _create_play_button(parent=None) -> QPushButton:
+    """Create a play button matching NDV's style."""
+    if ICONIFY_AVAILABLE:
+        icn = QIconifyIcon("bi:play-fill", color="#888888")
+        icn.addKey("bi:pause-fill", state=QIconifyIcon.State.On, color="#4580DD")
+        btn = QPushButton(icn, "", parent)
+        btn.setIconSize(QSize(16, 16))
+    else:
+        btn = QPushButton("▶", parent)
+    btn.setCheckable(True)
+    btn.setFixedSize(18, 18)
+    btn.setStyleSheet(PLAY_BUTTON_STYLE)
+    return btn
+
 
 logger = logging.getLogger(__name__)
+
+
+class MemoryBoundedLRUCache:
+    """Thread-safe LRU cache with memory-based size limit.
+
+    Evicts least-recently-used entries when memory limit is exceeded.
+    Designed for caching large numpy arrays (image planes).
+
+    Thread safety is required because dask workers may load planes concurrently.
+    """
+
+    def __init__(self, max_memory_bytes: int):
+        self._max_memory = max_memory_bytes
+        self._current_memory = 0
+        self._cache: OrderedDict = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: tuple) -> Optional[np.ndarray]:
+        """Get item from cache, marking it as recently used."""
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+            return None
+
+    def put(self, key: tuple, value: np.ndarray) -> None:
+        """Add item to cache, evicting LRU entries if needed."""
+        item_size = value.nbytes
+
+        # Don't cache if single item exceeds limit
+        if item_size > self._max_memory:
+            logger.debug(
+                "Cannot cache item (size %d bytes exceeds max %d bytes): key=%s",
+                item_size,
+                self._max_memory,
+                key,
+            )
+            return
+
+        with self._lock:
+            # Remove existing entry if present
+            if key in self._cache:
+                self._current_memory -= self._cache[key].nbytes
+                del self._cache[key]
+
+            # Evict LRU entries until we have room
+            while self._current_memory + item_size > self._max_memory and self._cache:
+                oldest_key, oldest_value = self._cache.popitem(last=False)
+                self._current_memory -= oldest_value.nbytes
+
+            self._cache[key] = value
+            self._current_memory += item_size
+
+    def clear(self) -> None:
+        """Clear all cached entries."""
+        with self._lock:
+            self._cache.clear()
+            self._current_memory = 0
+
+    def __contains__(self, key: tuple) -> bool:
+        with self._lock:
+            return key in self._cache
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._cache)
+
 
 # Module-level variable for voxel scale (used by monkey-patched add_volume)
 _current_voxel_scale: Optional[Tuple[float, float, float]] = None
@@ -863,7 +1000,19 @@ class LauncherWindow(QMainWindow):
 
 
 class LightweightViewer(QWidget):
-    """Minimal NDV-based viewer."""
+    """Minimal NDV-based viewer with external FOV/Time navigation.
+
+    For live acquisition, use the push-based API:
+    - start_acquisition() to configure channels, z-levels, dimensions
+    - register_image() to register each saved image
+    - load_fov() to navigate to a specific position
+
+    For viewing existing datasets, use load_dataset().
+    """
+
+    # Signal for thread-safe UI updates from register_image()
+    # Signature: (t, fov_idx, _unused1, _unused2) - last two reserved for future use
+    _image_registered = pyqtSignal(int, int, int, int)
 
     dataset_path: str
     ndv_viewer: Optional["ndv.ArrayViewer"]
@@ -872,7 +1021,7 @@ class LightweightViewer(QWidget):
     _last_sig: Optional[tuple]
     _refresh_timer: Optional[QTimer]
 
-    def __init__(self, dataset_path: str):
+    def __init__(self, dataset_path: str = ""):
         super().__init__()
         self.dataset_path = dataset_path
         self.ndv_viewer = None
@@ -884,12 +1033,43 @@ class LightweightViewer(QWidget):
         self._pending_channel_label_retries = (
             0  # Retry counter for channel label updates
         )
+
+        # External navigation state (push-based API for live acquisition)
+        # _file_index is accessed from both main thread and dask workers, needs lock
+        self._file_index: Dict[tuple, str] = {}  # (t, fov_idx, z, channel) -> filepath
+        self._file_index_lock = threading.Lock()
+        self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
+        self._channel_names: List[str] = []
+        self._z_levels: List[int] = []
+        self._luts: Dict[int, Any] = {}  # channel_idx -> colormap
+        self._current_fov_idx: int = 0
+        self._current_time_idx: int = 0
+        self._max_time_idx: int = 0  # Highest t seen (for slider range)
+        self._max_fov_per_time: Dict[int, int] = {}  # timepoint -> max FOV index seen
+        self._image_height: int = 0
+        self._image_width: int = 0
+        self._plane_cache = MemoryBoundedLRUCache(PLANE_CACHE_MAX_MEMORY_BYTES)
+        self._updating_sliders: bool = False  # Prevent recursive updates
+        self._acquisition_active: bool = False  # True during live acquisition
+        self._time_play_timer: Optional[QTimer] = None  # Timer for T slider animation
+        self._fov_play_timer: Optional[QTimer] = None  # Timer for FOV slider animation
+        self._load_debounce_timer: Optional[QTimer] = (
+            None  # Debounce for _load_current_fov
+        )
+        self._load_pending: bool = False  # True if load is scheduled
+
+        # Connect signal for thread-safe updates
+        self._image_registered.connect(self._on_image_registered)
+
         self._setup_ui()
-        self.load_dataset(dataset_path)
-        self._setup_live_refresh()
+        if dataset_path:
+            self.load_dataset(dataset_path)
+        # Note: _setup_live_refresh() removed - using push-based API instead
 
     def _setup_ui(self):
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
 
         # Status
         self.status_label = QLabel("Loading dataset...")
@@ -911,7 +1091,587 @@ class LightweightViewer(QWidget):
             placeholder.setAlignment(Qt.AlignCenter)
             layout.addWidget(placeholder, 1)
 
+        # Create slider container with NDV style
+        slider_container = QWidget()
+        slider_container.setStyleSheet(NDV_SLIDER_STYLE)
+        slider_layout = QVBoxLayout(slider_container)
+        slider_layout.setContentsMargins(5, 2, 5, 2)
+        slider_layout.setSpacing(2)
+
+        # Time slider (hidden if only 1 timepoint)
+        self._time_container = QWidget()
+        t_layout = QHBoxLayout(self._time_container)
+        t_layout.setContentsMargins(0, 0, 0, 0)
+        t_layout.setSpacing(5)
+        self._time_label = QLabel("T")
+        self._time_label.setFixedWidth(30)
+        self._time_play_btn = _create_play_button(self)
+        self._time_play_btn.clicked.connect(self._on_time_play_clicked)
+        if SUPERQT_AVAILABLE:
+            self._time_slider = QLabeledSlider(Qt.Horizontal)
+        else:
+            self._time_slider = QSlider(Qt.Horizontal)
+        self._time_slider.setMinimum(0)
+        self._time_slider.setMaximum(0)
+        self._time_slider.valueChanged.connect(self._on_time_slider_changed)
+        t_layout.addWidget(self._time_play_btn)
+        t_layout.addWidget(self._time_label)
+        t_layout.addWidget(self._time_slider)
+        self._time_container.setVisible(False)  # Hidden by default until max > 0
+        slider_layout.addWidget(self._time_container)
+
+        # FOV slider
+        fov_layout = QHBoxLayout()
+        fov_layout.setSpacing(5)
+        self._fov_label = QLabel("FOV")
+        self._fov_label.setFixedWidth(30)
+        self._fov_play_btn = _create_play_button(self)
+        self._fov_play_btn.clicked.connect(self._on_fov_play_clicked)
+        if SUPERQT_AVAILABLE:
+            self._fov_slider = QLabeledSlider(Qt.Horizontal)
+        else:
+            self._fov_slider = QSlider(Qt.Horizontal)
+        self._fov_slider.setMinimum(0)
+        self._fov_slider.setMaximum(0)
+        self._fov_slider.valueChanged.connect(self._on_fov_slider_changed)
+        fov_layout.addWidget(self._fov_play_btn)
+        fov_layout.addWidget(self._fov_label)
+        fov_layout.addWidget(self._fov_slider)
+        slider_layout.addLayout(fov_layout)
+
+        layout.addWidget(slider_container)
+
         self.setLayout(layout)
+
+    def _on_time_slider_changed(self, value: int):
+        """Handle time slider change."""
+        if self._updating_sliders:
+            return
+        if value != self._current_time_idx:
+            self._current_time_idx = value
+            self._time_label.setText(f"T: {value}")
+
+            # Update FOV slider max for this timepoint
+            self._updating_sliders = True
+            try:
+                available_fov_max = self._max_fov_per_time.get(value, 0)
+                self._fov_slider.setMaximum(available_fov_max)
+
+                # Clamp current FOV if it exceeds available range
+                if self._current_fov_idx > available_fov_max:
+                    self._current_fov_idx = available_fov_max
+                    self._fov_slider.setValue(available_fov_max)
+
+                # Update FOV label to reflect current FOV after any clamping
+                if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
+                    self._fov_label.setText(
+                        f"FOV: {self._fov_labels[self._current_fov_idx]}"
+                    )
+                else:
+                    self._fov_label.setText(f"FOV: {self._current_fov_idx}")
+            finally:
+                self._updating_sliders = False
+
+            self._load_current_fov()
+
+    def _on_fov_slider_changed(self, value: int):
+        """Handle FOV slider change."""
+        if self._updating_sliders:
+            return
+        if value != self._current_fov_idx:
+            self._current_fov_idx = value
+            # Update FOV label with well:fov format if available
+            if self._fov_labels and value < len(self._fov_labels):
+                self._fov_label.setText(f"FOV: {self._fov_labels[value]}")
+            else:
+                self._fov_label.setText(f"FOV: {value}")
+            self._load_current_fov()
+
+    def _on_time_play_clicked(self, checked: bool):
+        """Handle time play button click."""
+        if checked:
+            # Update text for fallback (iconify handles icon automatically)
+            if not ICONIFY_AVAILABLE:
+                self._time_play_btn.setText("⏸")
+            if self._time_play_timer is None:
+                self._time_play_timer = QTimer(self)
+                self._time_play_timer.timeout.connect(self._time_play_step)
+            self._time_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
+        else:
+            if not ICONIFY_AVAILABLE:
+                self._time_play_btn.setText("▶")
+            if self._time_play_timer:
+                self._time_play_timer.stop()
+
+    def _time_play_step(self):
+        """Advance time slider by one step (looping)."""
+        max_t = self._time_slider.maximum()
+        if max_t <= 0:
+            return
+        current = self._time_slider.value()
+        next_val = (current + 1) % (max_t + 1)
+        self._time_slider.setValue(next_val)
+
+    def _on_fov_play_clicked(self, checked: bool):
+        """Handle FOV play button click."""
+        if checked:
+            if not ICONIFY_AVAILABLE:
+                self._fov_play_btn.setText("⏸")
+            if self._fov_play_timer is None:
+                self._fov_play_timer = QTimer(self)
+                self._fov_play_timer.timeout.connect(self._fov_play_step)
+            self._fov_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
+        else:
+            if not ICONIFY_AVAILABLE:
+                self._fov_play_btn.setText("▶")
+            if self._fov_play_timer:
+                self._fov_play_timer.stop()
+
+    def _fov_play_step(self):
+        """Advance FOV slider by one step (looping)."""
+        max_fov = self._fov_slider.maximum()
+        if max_fov <= 0:
+            return
+        current = self._fov_slider.value()
+        next_val = (current + 1) % (max_fov + 1)
+        self._fov_slider.setValue(next_val)
+
+    def _stop_play_animation(
+        self, timer: Optional[QTimer], button: QPushButton
+    ) -> None:
+        """Stop a play animation and reset the button state."""
+        if timer and timer.isActive():
+            timer.stop()
+            button.setChecked(False)
+            if not ICONIFY_AVAILABLE:
+                button.setText("▶")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Push-based API for live acquisition
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def start_acquisition(
+        self,
+        channels: List[str],
+        num_z: int,
+        height: int,
+        width: int,
+        fov_labels: List[str],
+    ):
+        """Configure viewer for a new acquisition.
+
+        Call this at acquisition start before any register_image() calls.
+        Sets up LUTs based on channel wavelengths and configures sliders.
+
+        Args:
+            channels: Channel names, e.g. ["BF LED matrix full", "Fluorescence 488 nm Ex"]
+            num_z: Number of z-levels
+            height: Image height in pixels
+            width: Image width in pixels
+            fov_labels: FOV labels, e.g. ["A1:0", "A1:1", "A2:0"]
+        """
+        # Stop any running play animations and pending loads
+        self._stop_play_animation(self._time_play_timer, self._time_play_btn)
+        self._stop_play_animation(self._fov_play_timer, self._fov_play_btn)
+        if self._load_debounce_timer and self._load_debounce_timer.isActive():
+            self._load_debounce_timer.stop()
+        self._load_pending = False
+
+        # Clear previous state
+        with self._file_index_lock:
+            self._file_index.clear()
+        self._plane_cache.clear()
+        self._max_fov_per_time.clear()
+
+        # Store configuration
+        self._channel_names = list(channels)
+        self._z_levels = list(range(num_z))
+        self._image_height = height
+        self._image_width = width
+        self._fov_labels = list(fov_labels)
+
+        # Set up LUTs based on channel wavelengths
+        self._luts = {
+            i: wavelength_to_colormap(extract_wavelength(c))
+            for i, c in enumerate(self._channel_names)
+        }
+
+        # Reset navigation state
+        self._current_fov_idx = 0
+        self._current_time_idx = 0
+        self._max_time_idx = 0
+        self._acquisition_active = True
+
+        # Update sliders
+        self._updating_sliders = True
+        try:
+            self._time_slider.setMaximum(0)
+            self._time_slider.setValue(0)
+            self._time_label.setText("T: 0")
+
+            self._fov_slider.setMaximum(0)  # Start at 0, grows as FOVs are acquired
+            self._fov_slider.setValue(0)
+            if fov_labels:
+                self._fov_label.setText(f"FOV: {fov_labels[0]}")
+            else:
+                self._fov_label.setText("FOV: -")
+        finally:
+            self._updating_sliders = False
+
+        # Rebuild NDV viewer with channel configuration
+        self._rebuild_viewer_for_acquisition()
+
+        logger.info(
+            f"NDViewer: Started acquisition with {len(channels)} channels, "
+            f"{num_z} z-levels, {len(fov_labels)} FOVs"
+        )
+
+    def _rebuild_viewer_for_acquisition(self):
+        """Rebuild the NDV viewer for the current acquisition configuration."""
+        if not NDV_AVAILABLE or not self.ndv_viewer:
+            return
+
+        # Create placeholder array with correct shape: z_level × channel × y × x
+        n_z = len(self._z_levels) if self._z_levels else 1
+        n_c = len(self._channel_names) if self._channel_names else 1
+        h = self._image_height if self._image_height > 0 else 100
+        w = self._image_width if self._image_width > 0 else 100
+
+        placeholder = np.zeros((n_z, n_c, h, w), dtype=np.uint16)
+
+        import xarray as xr
+
+        xarr = xr.DataArray(
+            placeholder,
+            dims=["z_level", "channel", "y", "x"],
+            coords={
+                "z_level": self._z_levels if self._z_levels else [0],
+                "channel": list(range(n_c)),
+            },
+        )
+        xarr.attrs["luts"] = self._luts
+        xarr.attrs["channel_names"] = self._channel_names
+
+        self._xarray_data = xarr
+        self._set_ndv_data(xarr)
+
+    def register_image(self, t: int, fov_idx: int, z: int, channel: str, filepath: str):
+        """Register a newly saved image file.
+
+        Thread-safe: can be called from worker thread.
+        Updates file index and emits signal for GUI update.
+
+        Args:
+            t: Timepoint index
+            fov_idx: FOV index (0-based)
+            z: Z-level index
+            channel: Channel name
+            filepath: Path to the saved TIFF file
+        """
+        # Update file index (protected by lock for dask worker thread safety)
+        with self._file_index_lock:
+            self._file_index[(t, fov_idx, z, channel)] = filepath
+
+        # Emit signal with raw indices - main thread computes max values
+        # to avoid race condition on _max_time_idx
+        try:
+            self._image_registered.emit(t, fov_idx, 0, 0)
+        except RuntimeError as e:
+            # Qt object deleted - viewer was closed during acquisition
+            logger.warning(
+                "Could not emit image_registered signal (viewer may be closed): %s", e
+            )
+
+    def _on_image_registered(self, t: int, fov_idx: int, _unused1: int, _unused2: int):
+        """Handle image registration signal (runs on main thread).
+
+        Updates slider ranges and schedules debounced FOV load if needed.
+
+        Note: _unused1/_unused2 are placeholder parameters kept for signal
+        compatibility; max values are computed here from the current tracking
+        state (_max_time_idx, _max_fov_per_time), not passed via signal.
+        """
+        try:
+            # Update per-timepoint max FOV tracking
+            current_max_for_t = self._max_fov_per_time.get(t, -1)
+            if fov_idx > current_max_for_t:
+                self._max_fov_per_time[t] = fov_idx
+
+            # Compute max time
+            new_max_t = max(self._max_time_idx, t)
+
+            self._updating_sliders = True
+            try:
+                # Update T slider if needed
+                if new_max_t > self._max_time_idx:
+                    self._max_time_idx = new_max_t
+                    self._time_slider.setMaximum(new_max_t)
+
+                # Show T slider if we have multiple timepoints
+                if new_max_t > 0:
+                    self._time_container.setVisible(True)
+
+                # Update FOV slider max for CURRENT timepoint only
+                if t == self._current_time_idx:
+                    current_fov_max = self._fov_slider.maximum()
+                    available_fov_max = self._max_fov_per_time.get(t, 0)
+                    if available_fov_max > current_fov_max:
+                        self._fov_slider.setMaximum(available_fov_max)
+            finally:
+                self._updating_sliders = False
+
+            # Schedule debounced load if this image is for the current FOV
+            if t == self._current_time_idx and fov_idx == self._current_fov_idx:
+                self._schedule_debounced_load()
+        except Exception as e:
+            logger.error("Error in _on_image_registered: %s", e, exc_info=True)
+
+    def _schedule_debounced_load(self):
+        """Schedule a debounced load of the current FOV.
+
+        Coalesces rapid image registrations into a single load every 200ms.
+        This prevents overwhelming the main thread during fast acquisitions.
+        """
+        # Mark that a load is pending
+        self._load_pending = True
+
+        # Create timer if needed
+        if self._load_debounce_timer is None:
+            self._load_debounce_timer = QTimer(self)
+            self._load_debounce_timer.setSingleShot(True)
+            self._load_debounce_timer.timeout.connect(self._execute_debounced_load)
+
+        # If timer not running, start it; otherwise the existing timer will handle it
+        if not self._load_debounce_timer.isActive():
+            self._load_debounce_timer.start(200)  # 200ms debounce
+
+    def _execute_debounced_load(self):
+        """Execute the debounced FOV load."""
+        if self._load_pending:
+            self._load_pending = False
+            self._load_current_fov()
+
+    def load_fov(self, fov: int, t: Optional[int] = None, z: Optional[int] = None):
+        """Load and display a specific FOV.
+
+        Args:
+            fov: FOV index to display
+            t: Timepoint index (None = use current)
+            z: Z-level index (None = use current, not used for NDV internal z)
+
+        Only updates data, LUTs remain unchanged.
+        """
+        if t is not None:
+            self._current_time_idx = t
+        if fov != self._current_fov_idx:
+            self._current_fov_idx = fov
+
+        # Update sliders to reflect new position
+        self._updating_sliders = True
+        try:
+            self._time_slider.setValue(self._current_time_idx)
+            self._time_label.setText(f"T: {self._current_time_idx}")
+            self._fov_slider.setValue(self._current_fov_idx)
+            if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
+                self._fov_label.setText(
+                    f"FOV: {self._fov_labels[self._current_fov_idx]}"
+                )
+            else:
+                self._fov_label.setText(f"FOV: {self._current_fov_idx}")
+        finally:
+            self._updating_sliders = False
+
+        self._load_current_fov()
+
+    def go_to_well_fov(self, well_id: str, fov_index: int) -> bool:
+        """Navigate to a specific well and FOV (push-based API).
+
+        Maps (well_id, fov_index) to flat FOV index using _fov_labels.
+        Labels are in format "A1:0", "A1:1", "A2:0", etc.
+
+        Args:
+            well_id: Well identifier (e.g., "A1", "B2")
+            fov_index: FOV index within the well
+
+        Returns:
+            True if navigation succeeded, False if FOV not found.
+        """
+        if not self._fov_labels:
+            logger.debug("go_to_well_fov: no FOV labels available")
+            return False
+
+        # Find the flat index for this well:fov combination
+        target_label = f"{well_id}:{fov_index}"
+        try:
+            flat_idx = self._fov_labels.index(target_label)
+        except ValueError:
+            logger.debug(
+                f"go_to_well_fov: label '{target_label}' not found in {self._fov_labels}"
+            )
+            return False
+
+        self.load_fov(flat_idx)
+        logger.info(
+            f"go_to_well_fov: navigated to {target_label} (flat_idx={flat_idx})"
+        )
+        return True
+
+    def is_push_mode_active(self) -> bool:
+        """Check if push-based mode is active (has FOV labels configured)."""
+        return bool(self._fov_labels)
+
+    def _load_single_plane(
+        self, t: int, fov_idx: int, z: int, channel: str
+    ) -> np.ndarray:
+        """Load a single image plane from cache or disk.
+
+        Args:
+            t: Timepoint index
+            fov_idx: FOV index
+            z: Z-level value
+            channel: Channel name
+
+        Returns:
+            Image plane as numpy array, or zeros if not available.
+        """
+        cache_key = (t, fov_idx, z, channel)
+
+        # Check cache first
+        cached_plane = self._plane_cache.get(cache_key)
+        if cached_plane is not None:
+            return cached_plane
+
+        # Load from file (lock protects concurrent access from dask workers)
+        with self._file_index_lock:
+            filepath = self._file_index.get(cache_key)
+
+        if not filepath:
+            # File not yet registered - expected during acquisition, not an error
+            return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+        if not LAZY_LOADING_AVAILABLE:
+            logger.error("tifffile not available for loading image planes")
+            return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+        try:
+            with tf.TiffFile(filepath) as tif:
+                plane = tif.pages[0].asarray()
+                self._plane_cache.put(cache_key, plane)
+                return plane
+        except FileNotFoundError:
+            logger.warning("Image file not found (may have been deleted): %s", filepath)
+        except PermissionError as e:
+            logger.error("Permission denied reading image %s: %s", filepath, e)
+        except Exception as e:
+            logger.error(
+                "Failed to load image plane %s (t=%d, fov=%d, z=%d, ch=%s): %s",
+                filepath,
+                t,
+                fov_idx,
+                z,
+                channel,
+                e,
+                exc_info=True,
+            )
+
+        # Return zeros on error - user sees black image
+        return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+    def _load_current_fov(self):
+        """Load and display data for the current FOV position.
+
+        Creates a lazy dask array that only loads planes when NDV requests them.
+        This avoids loading all z-planes when only one is displayed.
+        """
+        # Check if we have data configuration (set by start_acquisition)
+        if not self._channel_names or not self._z_levels:
+            return
+        if self._image_height == 0 or self._image_width == 0:
+            return
+        # Check if we have any registered files
+        with self._file_index_lock:
+            if not self._file_index:
+                return
+
+        t = self._current_time_idx
+        fov_idx = self._current_fov_idx
+        h, w = self._image_height, self._image_width
+
+        # Create lazy dask array - planes only load when accessed
+        import dask
+        import dask.array as da
+
+        delayed_planes = []
+        for z in self._z_levels:
+            channel_planes = []
+            for channel in self._channel_names:
+                # Create delayed load - no disk I/O happens here
+                delayed_load = dask.delayed(self._load_single_plane)(
+                    t, fov_idx, z, channel
+                )
+                da_plane = da.from_delayed(delayed_load, shape=(h, w), dtype=np.uint16)
+                channel_planes.append(da_plane)
+            # Stack channels: (n_c, h, w)
+            delayed_planes.append(da.stack(channel_planes))
+        # Stack z-levels: (n_z, n_c, h, w)
+        data = da.stack(delayed_planes)
+
+        # Update NDV viewer data without rebuilding (preserves LUTs)
+        self._update_ndv_data(data)
+
+    def _update_ndv_data(self, data):
+        """Update NDV viewer with new data array, preserving LUTs.
+
+        Args:
+            data: numpy or dask array of shape (z_level, channel, y, x).
+                  Dask arrays enable lazy loading - planes only load when displayed.
+        """
+        if not NDV_AVAILABLE or not self.ndv_viewer:
+            return
+
+        import xarray as xr
+
+        xarr = xr.DataArray(
+            data,
+            dims=["z_level", "channel", "y", "x"],
+            coords={
+                "z_level": self._z_levels,
+                "channel": list(range(len(self._channel_names))),
+            },
+        )
+        xarr.attrs["luts"] = self._luts
+        xarr.attrs["channel_names"] = self._channel_names
+
+        self._xarray_data = xarr
+
+        # Try in-place update to avoid flickering
+        if not self._try_inplace_ndv_update(xarr):
+            # Fallback: full rebuild (shouldn't happen often)
+            self._set_ndv_data(xarr)
+
+    def end_acquisition(self):
+        """Mark acquisition as ended.
+
+        Call this when acquisition completes. The viewer remains in push mode
+        (is_push_mode_active() returns True) so navigation via go_to_well_fov()
+        continues to work for browsing the acquired data.
+
+        FOV labels are preserved to enable navigation. They are only cleared
+        when a new acquisition starts via start_acquisition().
+        """
+        # Stop any pending debounced load from previous acquisition
+        if self._load_debounce_timer and self._load_debounce_timer.isActive():
+            self._load_debounce_timer.stop()
+        self._load_pending = False
+
+        self._acquisition_active = False
+        # NOTE: _fov_labels is NOT cleared here - navigation must still work
+        # after acquisition ends. Labels are cleared in start_acquisition().
+        logger.info("NDViewer: Acquisition ended")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Legacy live refresh (kept for existing dataset viewing)
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _setup_live_refresh(self):
         """Poll the dataset folder periodically to pick up new timepoints during acquisition."""
@@ -940,6 +1700,12 @@ class LightweightViewer(QWidget):
         """Clean up resources when the widget is closed."""
         if self._refresh_timer:
             self._refresh_timer.stop()
+        if self._time_play_timer:
+            self._time_play_timer.stop()
+        if self._fov_play_timer:
+            self._fov_play_timer.stop()
+        if self._load_debounce_timer:
+            self._load_debounce_timer.stop()
         self._close_open_handles()
         super().closeEvent(event)
 
