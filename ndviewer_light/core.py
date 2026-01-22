@@ -79,7 +79,7 @@ if TYPE_CHECKING:
 # Constants
 TIFF_EXTENSIONS = {".tif", ".tiff"}
 LIVE_REFRESH_INTERVAL_MS = 750
-SLIDER_PLAY_INTERVAL_MS = 500  # Animation interval for play buttons
+SLIDER_PLAY_INTERVAL_MS = 100  # Animation interval for play buttons
 PLANE_CACHE_MAX_MEMORY_BYTES = 256 * 1024 * 1024  # 256MB for z-stack plane cache
 
 # Play button style (matches NDV's PlayButton)
@@ -105,23 +105,29 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryBoundedLRUCache:
-    """Simple LRU cache with memory-based size limit.
+    """Thread-safe LRU cache with memory-based size limit.
 
     Evicts least-recently-used entries when memory limit is exceeded.
     Designed for caching large numpy arrays (image planes).
+
+    Thread safety is required because dask workers may load planes concurrently.
     """
 
     def __init__(self, max_memory_bytes: int):
+        import threading
+
         self._max_memory = max_memory_bytes
         self._current_memory = 0
         self._cache: OrderedDict = OrderedDict()
+        self._lock = threading.Lock()
 
     def get(self, key: tuple) -> Optional[np.ndarray]:
         """Get item from cache, marking it as recently used."""
-        if key in self._cache:
-            self._cache.move_to_end(key)
-            return self._cache[key]
-        return None
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+            return None
 
     def put(self, key: tuple, value: np.ndarray) -> None:
         """Add item to cache, evicting LRU entries if needed."""
@@ -131,29 +137,33 @@ class MemoryBoundedLRUCache:
         if item_size > self._max_memory:
             return
 
-        # Remove existing entry if present
-        if key in self._cache:
-            self._current_memory -= self._cache[key].nbytes
-            del self._cache[key]
+        with self._lock:
+            # Remove existing entry if present
+            if key in self._cache:
+                self._current_memory -= self._cache[key].nbytes
+                del self._cache[key]
 
-        # Evict LRU entries until we have room
-        while self._current_memory + item_size > self._max_memory and self._cache:
-            oldest_key, oldest_value = self._cache.popitem(last=False)
-            self._current_memory -= oldest_value.nbytes
+            # Evict LRU entries until we have room
+            while self._current_memory + item_size > self._max_memory and self._cache:
+                oldest_key, oldest_value = self._cache.popitem(last=False)
+                self._current_memory -= oldest_value.nbytes
 
-        self._cache[key] = value
-        self._current_memory += item_size
+            self._cache[key] = value
+            self._current_memory += item_size
 
     def clear(self) -> None:
         """Clear all cached entries."""
-        self._cache.clear()
-        self._current_memory = 0
+        with self._lock:
+            self._cache.clear()
+            self._current_memory = 0
 
     def __contains__(self, key: tuple) -> bool:
-        return key in self._cache
+        with self._lock:
+            return key in self._cache
 
     def __len__(self) -> int:
-        return len(self._cache)
+        with self._lock:
+            return len(self._cache)
 
 
 # Module-level variable for voxel scale (used by monkey-patched add_volume)
@@ -997,7 +1007,11 @@ class LightweightViewer(QWidget):
         self._pending_channel_label_retries = 0  # Retry counter for channel label updates
 
         # External navigation state (push-based API for live acquisition)
+        # _file_index is accessed from both main thread and dask workers, needs lock
+        import threading
+
         self._file_index: Dict[tuple, str] = {}  # (t, fov_idx, z, channel) -> filepath
+        self._file_index_lock = threading.Lock()
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
@@ -1005,6 +1019,7 @@ class LightweightViewer(QWidget):
         self._current_fov_idx: int = 0
         self._current_time_idx: int = 0
         self._max_time_idx: int = 0  # Highest t seen (for slider range)
+        self._max_fov_per_time: Dict[int, int] = {}  # timepoint -> max FOV index seen
         self._image_height: int = 0
         self._image_width: int = 0
         self._plane_cache = MemoryBoundedLRUCache(PLANE_CACHE_MAX_MEMORY_BYTES)
@@ -1106,6 +1121,21 @@ class LightweightViewer(QWidget):
             return
         if value != self._current_time_idx:
             self._current_time_idx = value
+            self._time_label.setText(f"T: {value}")
+
+            # Update FOV slider max for this timepoint
+            self._updating_sliders = True
+            try:
+                available_fov_max = self._max_fov_per_time.get(value, 0)
+                self._fov_slider.setMaximum(available_fov_max)
+
+                # Clamp current FOV if it exceeds available range
+                if self._current_fov_idx > available_fov_max:
+                    self._current_fov_idx = available_fov_max
+                    self._fov_slider.setValue(available_fov_max)
+            finally:
+                self._updating_sliders = False
+
             self._load_current_fov()
 
     def _on_fov_slider_changed(self, value: int):
@@ -1205,8 +1235,10 @@ class LightweightViewer(QWidget):
         self._load_pending = False
 
         # Clear previous state
-        self._file_index.clear()
+        with self._file_index_lock:
+            self._file_index.clear()
         self._plane_cache.clear()
+        self._max_fov_per_time.clear()
 
         # Store configuration
         self._channel_names = list(channels)
@@ -1231,7 +1263,7 @@ class LightweightViewer(QWidget):
             self._time_slider.setValue(0)
             self._time_label.setText("T: 0")
 
-            self._fov_slider.setMaximum(max(0, len(fov_labels) - 1))
+            self._fov_slider.setMaximum(0)  # Start at 0, grows as FOVs are acquired
             self._fov_slider.setValue(0)
             if fov_labels:
                 self._fov_label.setText(f"FOV: {fov_labels[0]}")
@@ -1289,8 +1321,9 @@ class LightweightViewer(QWidget):
             channel: Channel name
             filepath: Path to the saved TIFF file
         """
-        # Update file index (dict operations are thread-safe in CPython)
-        self._file_index[(t, fov_idx, z, channel)] = filepath
+        # Update file index (protected by lock for dask worker thread safety)
+        with self._file_index_lock:
+            self._file_index[(t, fov_idx, z, channel)] = filepath
 
         # Emit signal with raw indices - main thread computes max values
         # to avoid race condition on _max_time_idx
@@ -1303,24 +1336,31 @@ class LightweightViewer(QWidget):
         Note: _unused1/_unused2 are legacy parameters, max values computed here.
         """
         try:
-            # Compute max values on main thread to avoid race condition
-            new_max_t = max(self._max_time_idx, t)
-            new_max_fov = max(len(self._fov_labels) - 1, fov_idx)
+            # Update per-timepoint max FOV tracking
+            current_max_for_t = self._max_fov_per_time.get(t, -1)
+            if fov_idx > current_max_for_t:
+                self._max_fov_per_time[t] = fov_idx
 
-            # Update slider ranges if needed
+            # Compute max time
+            new_max_t = max(self._max_time_idx, t)
+
             self._updating_sliders = True
             try:
+                # Update T slider if needed
                 if new_max_t > self._max_time_idx:
                     self._max_time_idx = new_max_t
                     self._time_slider.setMaximum(new_max_t)
 
-                current_max_fov = self._fov_slider.maximum()
-                if new_max_fov > current_max_fov:
-                    self._fov_slider.setMaximum(new_max_fov)
-
                 # Show T slider if we have multiple timepoints
                 if new_max_t > 0:
                     self._time_container.setVisible(True)
+
+                # Update FOV slider max for CURRENT timepoint only
+                if t == self._current_time_idx:
+                    current_fov_max = self._fov_slider.maximum()
+                    available_fov_max = self._max_fov_per_time.get(t, 0)
+                    if available_fov_max > current_fov_max:
+                        self._fov_slider.setMaximum(available_fov_max)
             finally:
                 self._updating_sliders = False
 
@@ -1416,11 +1456,53 @@ class LightweightViewer(QWidget):
         """Check if push-based mode is active (has FOV labels configured)."""
         return bool(self._fov_labels)
 
+    def _load_single_plane(self, t: int, fov_idx: int, z: int, channel: str) -> np.ndarray:
+        """Load a single image plane from cache or disk.
+
+        Args:
+            t: Timepoint index
+            fov_idx: FOV index
+            z: Z-level value
+            channel: Channel name
+
+        Returns:
+            Image plane as numpy array, or zeros if not available.
+        """
+        cache_key = (t, fov_idx, z, channel)
+
+        # Check cache first
+        cached_plane = self._plane_cache.get(cache_key)
+        if cached_plane is not None:
+            return cached_plane
+
+        # Load from file (lock protects concurrent access from dask workers)
+        with self._file_index_lock:
+            filepath = self._file_index.get(cache_key)
+        if filepath:
+            try:
+                with tf.TiffFile(filepath) as tif:
+                    plane = tif.pages[0].asarray()
+                    self._plane_cache.put(cache_key, plane)
+                    return plane
+            except Exception as e:
+                logger.warning(
+                    "Failed to load image plane %s (t=%d, fov=%d, z=%d, ch=%s): %s",
+                    filepath,
+                    t,
+                    fov_idx,
+                    z,
+                    channel,
+                    e,
+                )
+
+        # Return zeros if file not available
+        return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
     def _load_current_fov(self):
         """Load and display data for the current FOV position.
 
-        Loads image planes from registered files into a numpy array
-        and updates the NDV viewer. Missing planes show as zeros.
+        Creates a lazy dask array that only loads planes when NDV requests them.
+        This avoids loading all z-planes when only one is displayed.
         """
         # Check if we have data configuration (set by start_acquisition)
         if not self._channel_names or not self._z_levels:
@@ -1428,56 +1510,40 @@ class LightweightViewer(QWidget):
         if self._image_height == 0 or self._image_width == 0:
             return
         # Check if we have any registered files
-        if not self._file_index:
-            return
+        with self._file_index_lock:
+            if not self._file_index:
+                return
 
         t = self._current_time_idx
         fov_idx = self._current_fov_idx
-
-        n_z = len(self._z_levels)
-        n_c = len(self._channel_names)
         h, w = self._image_height, self._image_width
 
-        # Load all planes for this FOV into a numpy array
-        data = np.zeros((n_z, n_c, h, w), dtype=np.uint16)
+        # Create lazy dask array - planes only load when accessed
+        import dask
+        import dask.array as da
 
-        for z_idx, z in enumerate(self._z_levels):
-            for c_idx, channel in enumerate(self._channel_names):
-                cache_key = (t, fov_idx, z, channel)
-
-                # Check cache first
-                cached_plane = self._plane_cache.get(cache_key)
-                if cached_plane is not None:
-                    data[z_idx, c_idx] = cached_plane
-                    continue
-
-                # Load from file
-                filepath = self._file_index.get(cache_key)
-                if filepath:
-                    try:
-                        with tf.TiffFile(filepath) as tif:
-                            plane = tif.pages[0].asarray()
-                            data[z_idx, c_idx] = plane
-                            self._plane_cache.put(cache_key, plane)
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to load image plane %s (t=%d, fov=%d, z=%d, ch=%s): %s",
-                            filepath,
-                            t,
-                            fov_idx,
-                            z,
-                            channel,
-                            e,
-                        )
+        delayed_planes = []
+        for z in self._z_levels:
+            channel_planes = []
+            for channel in self._channel_names:
+                # Create delayed load - no disk I/O happens here
+                delayed_load = dask.delayed(self._load_single_plane)(t, fov_idx, z, channel)
+                da_plane = da.from_delayed(delayed_load, shape=(h, w), dtype=np.uint16)
+                channel_planes.append(da_plane)
+            # Stack channels: (n_c, h, w)
+            delayed_planes.append(da.stack(channel_planes))
+        # Stack z-levels: (n_z, n_c, h, w)
+        data = da.stack(delayed_planes)
 
         # Update NDV viewer data without rebuilding (preserves LUTs)
         self._update_ndv_data(data)
 
-    def _update_ndv_data(self, data: np.ndarray):
+    def _update_ndv_data(self, data):
         """Update NDV viewer with new data array, preserving LUTs.
 
         Args:
-            data: numpy array of shape (z_level, channel, y, x)
+            data: numpy or dask array of shape (z_level, channel, y, x).
+                  Dask arrays enable lazy loading - planes only load when displayed.
         """
         if not NDV_AVAILABLE or not self.ndv_viewer:
             return
