@@ -934,8 +934,7 @@ class LauncherWindow(QMainWindow):
         # Drop zone / Open button
         self.drop_label = QLabel("Drop folder here\nor click to open")
         self.drop_label.setAlignment(Qt.AlignCenter)
-        self.drop_label.setStyleSheet(
-            """
+        self.drop_label.setStyleSheet("""
             QLabel {
                 border: 2px dashed #666;
                 border-radius: 10px;
@@ -948,8 +947,7 @@ class LauncherWindow(QMainWindow):
                 border-color: #888;
                 background: #333;
             }
-        """
-        )
+        """)
         self.drop_label.setMinimumHeight(150)
         self.drop_label.mousePressEvent = lambda e: self._open_folder_dialog()
         layout.addWidget(self.drop_label)
@@ -1052,7 +1050,9 @@ class LightweightViewer(QWidget):
         self._dz_um: Optional[float] = None  # Z step size in micrometers
         self._is_ome_format: bool = False  # True if dataset is OME-TIFF format
         self._ome_file_index: Dict[int, str] = {}  # flat_fov_idx -> OME filepath
-        self._pull_mode: bool = False  # True if using pre-built 6D array (fast navigation)
+        self._pull_mode: bool = (
+            False  # True if using pre-built 6D array (fast navigation)
+        )
         self._plane_cache = MemoryBoundedLRUCache(PLANE_CACHE_MAX_MEMORY_BYTES)
         self._updating_sliders: bool = False  # Prevent recursive updates
         self._acquisition_active: bool = False  # True during live acquisition
@@ -1178,7 +1178,9 @@ class LightweightViewer(QWidget):
                         self._fov_slider.setValue(available_fov_max)
 
                     # Update FOV label to reflect current FOV after any clamping
-                    if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
+                    if self._fov_labels and self._current_fov_idx < len(
+                        self._fov_labels
+                    ):
                         self._fov_label.setText(
                             f"FOV: {self._fov_labels[self._current_fov_idx]}"
                         )
@@ -2149,7 +2151,9 @@ class LightweightViewer(QWidget):
         try:
             # Use NDV's official hide_sliders API
             # show_remainder=False prevents showing sliders for visible axes (x, y)
-            if hasattr(self.ndv_viewer, "_view") and hasattr(self.ndv_viewer._view, "hide_sliders"):
+            if hasattr(self.ndv_viewer, "_view") and hasattr(
+                self.ndv_viewer._view, "hide_sliders"
+            ):
                 self.ndv_viewer._view.hide_sliders(dims_to_hide, show_remainder=False)
         except Exception as e:
             logger.debug("Could not hide NDV sliders: %s", e)
@@ -2221,7 +2225,10 @@ class LightweightViewer(QWidget):
                 insert_pos = min(2, main_layout.count())
                 main_layout.insertWidget(insert_pos, self._slider_container)
 
-            logger.debug("Inserted custom sliders into NDV layout at position %d", dims_slider_idx + 1)
+            logger.debug(
+                "Inserted custom sliders into NDV layout at position %d",
+                dims_slider_idx + 1,
+            )
         except Exception as e:
             logger.debug("Could not insert sliders into NDV layout: %s", e)
 
@@ -2237,7 +2244,10 @@ class LightweightViewer(QWidget):
         if self._pull_mode:
             # Use QTimer to defer hiding until after NDV finishes recreating sliders
             from PyQt5.QtCore import QTimer
-            QTimer.singleShot(50, lambda: self._hide_ndv_dimension_sliders(["time", "fov"]))
+
+            QTimer.singleShot(
+                50, lambda: self._hide_ndv_dimension_sliders(["time", "fov"])
+            )
 
     def _scan_dataset_to_internal_state(self, base_path: Path) -> bool:
         """Scan filesystem and populate internal state for push-mode architecture.
@@ -2364,7 +2374,7 @@ class LightweightViewer(QWidget):
         for t in times_seen:
             fovs_for_t = set()
             with self._file_index_lock:
-                for (ft, fov_idx, z, ch) in self._file_index.keys():
+                for ft, fov_idx, z, ch in self._file_index.keys():
                     if ft == t:
                         fovs_for_t.add(fov_idx)
             if fovs_for_t:
@@ -2436,7 +2446,9 @@ class LightweightViewer(QWidget):
                         import xml.etree.ElementTree as ET
 
                         root = ET.fromstring(tif.ome_metadata)
-                        ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
+                        ns = {
+                            "ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"
+                        }
                         for ch in root.findall(".//ome:Channel", ns):
                             name = ch.get("Name") or ch.get("ID", "")
                             if name:
@@ -2993,7 +3005,9 @@ class LightweightViewer(QWidget):
         layout.insertWidget(idx, self.ndv_viewer.widget(), 1)
 
         # Connect to nDimsRequested signal to re-hide sliders when 3D mode is toggled
-        if hasattr(self.ndv_viewer, "_view") and hasattr(self.ndv_viewer._view, "nDimsRequested"):
+        if hasattr(self.ndv_viewer, "_view") and hasattr(
+            self.ndv_viewer._view, "nDimsRequested"
+        ):
             self.ndv_viewer._view.nDimsRequested.connect(self._on_ndv_ndims_requested)
 
         # Update channel labels after viewer is ready.
