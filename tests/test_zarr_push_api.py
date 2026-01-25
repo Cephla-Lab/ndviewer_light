@@ -4,11 +4,7 @@ Tests verify the API contract without requiring Qt initialization.
 These are logic-focused tests that verify state management and signal handling.
 """
 
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 
 class TestZarrPushApiLogic:
