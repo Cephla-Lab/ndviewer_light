@@ -165,6 +165,18 @@ class MemoryBoundedLRUCache:
             self._cache.clear()
             self._current_memory = 0
 
+    def invalidate(self, key: tuple) -> bool:
+        """Remove a specific entry from cache if present.
+
+        Returns True if entry was removed, False if not found.
+        """
+        with self._lock:
+            if key in self._cache:
+                self._current_memory -= self._cache[key].nbytes
+                del self._cache[key]
+                return True
+            return False
+
     def __contains__(self, key: tuple) -> bool:
         with self._lock:
             return key in self._cache
@@ -2417,6 +2429,10 @@ class LightweightViewer(QWidget):
         cache_key = ("zarr", t, global_fov_idx, z, channel_idx)
         self._zarr_written_planes.add(cache_key)
 
+        # Invalidate any cached entry for this plane. This handles the race condition
+        # where the viewer read zeros before the data was flushed to disk.
+        self._plane_cache.invalidate(cache_key)
+
         # Emit signal for main thread handling
         try:
             self._zarr_frame_registered.emit(t, global_fov_idx, z, channel_idx)
@@ -2510,6 +2526,11 @@ class LightweightViewer(QWidget):
         if cached_plane is not None:
             return cached_plane
 
+        # Record if plane was marked as written BEFORE we read. This prevents a race
+        # where notify_zarr_frame is called during our read - we shouldn't cache
+        # potentially stale data that was read before the notification.
+        was_written_before_read = cache_key in self._zarr_written_planes
+
         # Determine which store to use based on mode
         arr = None
 
@@ -2547,12 +2568,9 @@ class LightweightViewer(QWidget):
                 # Index 6D: (FOV, T, C, Z, Y, X) → arr[fov, t, c, z, :, :]
                 plane = arr[local_fov_idx, t, channel_idx, z, :, :].read().result()
                 plane = np.asarray(plane)
-                # Cache if not in live acquisition, or if plane was explicitly written
-                # This prevents caching unwritten (zero) planes during live acquisition
-                if (
-                    not self._zarr_acquisition_active
-                    or cache_key in self._zarr_written_planes
-                ):
+                # Cache if not in live acquisition, or if plane was written before we read.
+                # Using was_written_before_read prevents race with notify_zarr_frame.
+                if not self._zarr_acquisition_active or was_written_before_read:
                     self._plane_cache.put(cache_key, plane)
                 return plane
             except (IndexError, KeyError) as e:
@@ -2633,12 +2651,9 @@ class LightweightViewer(QWidget):
                 )
 
             plane = np.asarray(plane)
-            # Cache if not in live acquisition, or if plane was explicitly written
-            # This prevents caching unwritten (zero) planes during live acquisition
-            if (
-                not self._zarr_acquisition_active
-                or cache_key in self._zarr_written_planes
-            ):
+            # Cache if not in live acquisition, or if plane was written before we read.
+            # Using was_written_before_read prevents race with notify_zarr_frame.
+            if not self._zarr_acquisition_active or was_written_before_read:
                 self._plane_cache.put(cache_key, plane)
             return plane
 
