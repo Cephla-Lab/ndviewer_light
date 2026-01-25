@@ -817,7 +817,38 @@ def read_tiff_pixel_size(tiff_path: str) -> Optional[float]:
 
 
 def detect_format(base_path: Path) -> str:
-    """Detect OME-TIFF vs single-TIFF format."""
+    """Detect dataset format: zarr_v3, ome_tiff, or single_tiff.
+
+    Zarr v3 is detected by:
+    - plate.zarr directory (HCS format)
+    - zarr/ directory with .zarr subdirectories
+    - base_path itself being a .zarr directory with zarr.json or .zattrs
+
+    OME-TIFF is detected by .ome.tif* files.
+    Falls back to single_tiff if neither is detected.
+    """
+    # Check for zarr v3 formats
+    # 1. HCS plate format: plate.zarr/
+    if (base_path / "plate.zarr").exists():
+        return "zarr_v3"
+
+    # 2. Non-HCS: zarr/ directory with .zarr subdirs
+    zarr_dir = base_path / "zarr"
+    if zarr_dir.exists():
+        for region_dir in zarr_dir.iterdir():
+            if region_dir.is_dir() and not region_dir.name.startswith("."):
+                # Check for acquisition.zarr or fov_*.zarr
+                if (region_dir / "acquisition.zarr").exists():
+                    return "zarr_v3"
+                if any(d.suffix == ".zarr" for d in region_dir.iterdir() if d.is_dir()):
+                    return "zarr_v3"
+
+    # 3. Direct .zarr directory
+    if base_path.suffix == ".zarr":
+        if (base_path / "zarr.json").exists() or (base_path / ".zattrs").exists():
+            return "zarr_v3"
+
+    # Check for OME-TIFF
     ome_dir = base_path / "ome_tiff"
     if ome_dir.exists():
         if any(".ome" in f.name for f in ome_dir.glob("*.tif*")):
@@ -847,6 +878,255 @@ def wavelength_to_colormap(wavelength: Optional[int]) -> str:
     elif wavelength >= 700:
         return "magenta"
     return "gray"
+
+
+def hex_to_colormap(hex_color: str) -> str:
+    """Convert hex RGB color to nearest NDV colormap name.
+
+    Args:
+        hex_color: Hex color string, e.g., "#20ADF8" or "20ADF8"
+
+    Returns:
+        NDV colormap name: blue, green, yellow, red, magenta, cyan, or gray.
+    """
+    if not hex_color:
+        return "gray"
+
+    # Remove '#' prefix if present
+    hex_color = hex_color.lstrip("#")
+    if len(hex_color) != 6:
+        return "gray"
+
+    try:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+    except ValueError:
+        return "gray"
+
+    # Define reference colors for NDV colormaps (approximate RGB values)
+    colormap_refs = {
+        "blue": (0, 0, 255),
+        "green": (0, 255, 0),
+        "yellow": (255, 255, 0),
+        "red": (255, 0, 0),
+        "magenta": (255, 0, 255),
+        "cyan": (0, 255, 255),
+        "gray": (128, 128, 128),
+    }
+
+    # Find nearest colormap by Euclidean distance in RGB space
+    min_dist = float("inf")
+    best_colormap = "gray"
+    for name, (ref_r, ref_g, ref_b) in colormap_refs.items():
+        dist = (r - ref_r) ** 2 + (g - ref_g) ** 2 + (b - ref_b) ** 2
+        if dist < min_dist:
+            min_dist = dist
+            best_colormap = name
+
+    return best_colormap
+
+
+def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
+    """Parse OME-NGFF metadata from zarr v3 .zattrs file.
+
+    Extracts metadata from zarr v3 stores created by Squid:
+    - multiscales[0].axes: axis order and names
+    - multiscales[0].coordinateTransformations: physical pixel sizes
+    - omero.channels: channel names and hex colors
+    - _squid_metadata: Squid-specific metadata (physical sizes, acquisition_complete)
+
+    Args:
+        zarr_path: Path to a .zarr directory
+
+    Returns:
+        Dict with keys:
+        - axes: List of axis dicts from multiscales
+        - pixel_size_um: XY pixel size in micrometers (or None)
+        - dz_um: Z step in micrometers (or None)
+        - channel_names: List of channel names
+        - channel_colors: List of hex color strings
+        - acquisition_complete: bool (True if acquisition is finished)
+    """
+    result = {
+        "axes": [],
+        "pixel_size_um": None,
+        "dz_um": None,
+        "channel_names": [],
+        "channel_colors": [],
+        "acquisition_complete": False,
+    }
+
+    zattrs_path = zarr_path / ".zattrs"
+    if not zattrs_path.exists():
+        return result
+
+    try:
+        with open(zattrs_path, "r") as f:
+            attrs = json.load(f)
+    except Exception as e:
+        logger.debug("Failed to read .zattrs: %s", e)
+        return result
+
+    # Extract multiscales metadata (OME-NGFF format)
+    multiscales = attrs.get("multiscales", [])
+    if multiscales and isinstance(multiscales, list):
+        ms = multiscales[0]
+        result["axes"] = ms.get("axes", [])
+
+        # Extract physical scales from coordinateTransformations
+        coord_transforms = ms.get("coordinateTransformations", [])
+        if not coord_transforms:
+            # Also check datasets[0].coordinateTransformations
+            datasets = ms.get("datasets", [])
+            if datasets:
+                coord_transforms = datasets[0].get("coordinateTransformations", [])
+
+        for transform in coord_transforms:
+            if transform.get("type") == "scale":
+                scales = transform.get("scale", [])
+                # Map axis names to scale values
+                axes = result["axes"]
+                for i, ax in enumerate(axes):
+                    if i < len(scales):
+                        ax_name = ax.get("name", "").lower()
+                        ax_unit = ax.get("unit", "").lower()
+                        scale_val = scales[i]
+                        # Convert to micrometers if needed
+                        if ax_unit == "nanometer":
+                            scale_val = scale_val / 1000.0
+                        elif ax_unit == "millimeter":
+                            scale_val = scale_val * 1000.0
+                        elif ax_unit == "meter":
+                            scale_val = scale_val * 1e6
+                        # Assign to appropriate field
+                        if ax_name in ("x", "y"):
+                            if result["pixel_size_um"] is None:
+                                result["pixel_size_um"] = scale_val
+                        elif ax_name == "z":
+                            result["dz_um"] = scale_val
+                break  # Only use first scale transform
+
+    # Extract omero channel metadata
+    omero = attrs.get("omero", {})
+    channels = omero.get("channels", [])
+    for ch in channels:
+        name = ch.get("label") or ch.get("name") or ""
+        result["channel_names"].append(name)
+        # Color can be hex string or integer
+        color = ch.get("color", "")
+        if isinstance(color, int):
+            color = f"{color:06X}"
+        result["channel_colors"].append(color)
+
+    # Extract Squid-specific metadata (overrides OME-NGFF if present)
+    squid_meta = attrs.get("_squid_metadata", {})
+    if squid_meta:
+        if "pixel_size_um" in squid_meta:
+            result["pixel_size_um"] = squid_meta["pixel_size_um"]
+        if "z_step_um" in squid_meta:
+            result["dz_um"] = squid_meta["z_step_um"]
+        result["acquisition_complete"] = squid_meta.get("acquisition_complete", False)
+
+    return result
+
+
+def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
+    """Discover zarr v3 FOV stores within a dataset directory.
+
+    Scans for three possible zarr v3 structures created by Squid:
+    1. HCS plate: plate.zarr/row/col/field/time/acquisition.zarr
+    2. Non-HCS per-FOV: zarr/region/fov_N.zarr
+    3. Non-HCS 6D: zarr/region/acquisition.zarr (single store with FOV dimension)
+
+    Args:
+        base_path: Dataset root directory
+
+    Returns:
+        Tuple of:
+        - List of dicts: [{"region": str, "fov": int, "path": Path}, ...]
+        - Structure type: "hcs_plate", "per_fov", "6d_single", or "unknown"
+    """
+    fovs = []
+
+    # Check for HCS plate structure: plate.zarr/
+    plate_zarr = base_path / "plate.zarr"
+    if plate_zarr.exists():
+        # Scan row/col/field structure
+        for row_dir in sorted(plate_zarr.iterdir()):
+            if not row_dir.is_dir() or row_dir.name.startswith("."):
+                continue
+            for col_dir in sorted(row_dir.iterdir()):
+                if not col_dir.is_dir() or col_dir.name.startswith("."):
+                    continue
+                well_id = f"{row_dir.name}{col_dir.name}"
+                # Look for field directories (0, 1, 2, ...)
+                for field_dir in sorted(col_dir.iterdir()):
+                    if not field_dir.is_dir() or not field_dir.name.isdigit():
+                        continue
+                    field_idx = int(field_dir.name)
+                    # Look for acquisition.zarr inside field or field/time structure
+                    acq_zarr = field_dir / "acquisition.zarr"
+                    if acq_zarr.exists():
+                        fovs.append(
+                            {"region": well_id, "fov": field_idx, "path": acq_zarr}
+                        )
+                    else:
+                        # Check for time/acquisition.zarr structure
+                        for time_dir in sorted(field_dir.iterdir()):
+                            if not time_dir.is_dir() or not time_dir.name.isdigit():
+                                continue
+                            acq_zarr = time_dir / "acquisition.zarr"
+                            if acq_zarr.exists():
+                                fovs.append(
+                                    {
+                                        "region": well_id,
+                                        "fov": field_idx,
+                                        "path": acq_zarr,
+                                    }
+                                )
+                                break  # Use first timepoint's zarr
+        if fovs:
+            return fovs, "hcs_plate"
+
+    # Check for non-HCS per-FOV: zarr/region/fov_N.zarr
+    zarr_dir = base_path / "zarr"
+    if zarr_dir.exists():
+        for region_dir in sorted(zarr_dir.iterdir()):
+            if not region_dir.is_dir() or region_dir.name.startswith("."):
+                continue
+            region_name = region_dir.name
+
+            # Check for acquisition.zarr (6D single dataset)
+            acq_zarr = region_dir / "acquisition.zarr"
+            if acq_zarr.exists():
+                # This is a 6D single store - return just this one
+                fovs.append({"region": region_name, "fov": 0, "path": acq_zarr})
+                return fovs, "6d_single"
+
+            # Look for fov_N.zarr files
+            fov_pattern = re.compile(r"fov_(\d+)\.zarr")
+            for fov_dir in sorted(region_dir.iterdir()):
+                if not fov_dir.is_dir():
+                    continue
+                m = fov_pattern.match(fov_dir.name)
+                if m:
+                    fov_idx = int(m.group(1))
+                    fovs.append(
+                        {"region": region_name, "fov": fov_idx, "path": fov_dir}
+                    )
+        if fovs:
+            return fovs, "per_fov"
+
+    # Check if base_path itself is a .zarr directory
+    if base_path.suffix == ".zarr":
+        zarr_json = base_path / "zarr.json"
+        zattrs = base_path / ".zattrs"
+        if zarr_json.exists() or zattrs.exists():
+            fovs.append({"region": "default", "fov": 0, "path": base_path})
+            return fovs, "6d_single"
+
+    return [], "unknown"
 
 
 def data_structure_changed(
@@ -1014,12 +1294,22 @@ class LightweightViewer(QWidget):
     # Signature: (t, fov_idx, _unused1, _unused2) - last two reserved for future use
     _image_registered = pyqtSignal(int, int, int, int)
 
+    # Signal for thread-safe UI updates from notify_zarr_frame()
+    # Signature: (t, fov_idx, z, channel_idx)
+    _zarr_frame_registered = pyqtSignal(int, int, int, int)
+
     dataset_path: str
     ndv_viewer: Optional["ndv.ArrayViewer"]
     _xarray_data: Optional["xr.DataArray"]
     _open_handles: List
     _last_sig: Optional[tuple]
     _refresh_timer: Optional[QTimer]
+
+    # Zarr push-based API state
+    _zarr_acquisition_path: Optional[Path]
+    _zarr_acquisition_store: Optional[Any]  # zarr.Array
+    _zarr_acquisition_active: bool
+    _zarr_channel_map: Dict[str, int]
 
     def __init__(self, dataset_path: str = ""):
         super().__init__()
@@ -1058,8 +1348,17 @@ class LightweightViewer(QWidget):
         )
         self._load_pending: bool = False  # True if load is scheduled
 
-        # Connect signal for thread-safe updates
+        # Zarr push-based API state
+        self._zarr_acquisition_path: Optional[Path] = None
+        self._zarr_acquisition_store = None  # zarr.Array handle
+        self._zarr_acquisition_active: bool = False
+        self._zarr_channel_map: Dict[str, int] = {}
+        self._zarr_debounce_timer: Optional[QTimer] = None  # Debounce for zarr loads
+        self._zarr_load_pending: bool = False
+
+        # Connect signals for thread-safe updates
         self._image_registered.connect(self._on_image_registered)
+        self._zarr_frame_registered.connect(self._on_zarr_frame_registered)
 
         self._setup_ui()
         if dataset_path:
@@ -1517,8 +1816,8 @@ class LightweightViewer(QWidget):
         return True
 
     def is_push_mode_active(self) -> bool:
-        """Check if push-based mode is active (has FOV labels configured)."""
-        return bool(self._fov_labels)
+        """Check if push-based mode is active (has FOV labels configured or zarr mode)."""
+        return bool(self._fov_labels) or self._zarr_acquisition_active
 
     def _load_single_plane(
         self, t: int, fov_idx: int, z: int, channel: str
@@ -1670,6 +1969,313 @@ class LightweightViewer(QWidget):
         logger.info("NDViewer: Acquisition ended")
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Push-based Zarr API for live acquisition
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def start_zarr_acquisition(
+        self,
+        zarr_path: str,
+        channels: List[str],
+        num_z: int,
+        fov_labels: List[str],
+        height: int,
+        width: int,
+    ):
+        """Configure viewer for zarr-based live acquisition.
+
+        Call this at acquisition start before any notify_zarr_frame() calls.
+        Sets up the viewer with channel configuration and opens the zarr store.
+
+        Args:
+            zarr_path: Path to the zarr store being written to
+            channels: Channel names, e.g. ["DAPI", "GFP", "RFP"]
+            num_z: Number of z-levels
+            fov_labels: FOV labels, e.g. ["A1:0", "A1:1", "A2:0"]
+            height: Image height in pixels
+            width: Image width in pixels
+        """
+        import zarr
+
+        # Stop any running animations and pending loads
+        self._stop_play_animation(self._time_play_timer, self._time_play_btn)
+        self._stop_play_animation(self._fov_play_timer, self._fov_play_btn)
+        if self._zarr_debounce_timer and self._zarr_debounce_timer.isActive():
+            self._zarr_debounce_timer.stop()
+        self._zarr_load_pending = False
+
+        # Close any existing zarr store
+        self._zarr_acquisition_store = None
+
+        # Clear previous state
+        self._plane_cache.clear()
+        self._max_fov_per_time.clear()
+
+        # Store configuration
+        self._channel_names = list(channels)
+        self._z_levels = list(range(num_z))
+        self._image_height = height
+        self._image_width = width
+        self._fov_labels = list(fov_labels)
+        self._zarr_acquisition_path = Path(zarr_path)
+
+        # Build channel name to index map
+        self._zarr_channel_map = {name: i for i, name in enumerate(self._channel_names)}
+
+        # Set up LUTs based on channel wavelengths
+        self._luts = {
+            i: wavelength_to_colormap(extract_wavelength(c))
+            for i, c in enumerate(self._channel_names)
+        }
+
+        # Try to open zarr store (may not exist yet during acquisition start)
+        try:
+            self._zarr_acquisition_store = zarr.open(str(zarr_path), mode="r")
+        except Exception as e:
+            logger.debug("Zarr store not yet available: %s", e)
+            self._zarr_acquisition_store = None
+
+        # Reset navigation state
+        self._current_fov_idx = 0
+        self._current_time_idx = 0
+        self._max_time_idx = 0
+        self._zarr_acquisition_active = True
+
+        # Update sliders
+        self._updating_sliders = True
+        try:
+            self._time_slider.setMaximum(0)
+            self._time_slider.setValue(0)
+            self._time_label.setText("T: 0")
+
+            self._fov_slider.setMaximum(0)
+            self._fov_slider.setValue(0)
+            if fov_labels:
+                self._fov_label.setText(f"FOV: {fov_labels[0]}")
+            else:
+                self._fov_label.setText("FOV: -")
+        finally:
+            self._updating_sliders = False
+
+        # Rebuild NDV viewer with channel configuration
+        self._rebuild_viewer_for_acquisition()
+
+        logger.info(
+            f"NDViewer: Started zarr acquisition with {len(channels)} channels, "
+            f"{num_z} z-levels, {len(fov_labels)} FOVs at {zarr_path}"
+        )
+
+    def notify_zarr_frame(self, t: int, fov_idx: int, z: int, channel: str):
+        """Notify viewer that a new frame was written to the zarr store.
+
+        Thread-safe: can be called from acquisition worker thread.
+        Call this after each frame is written to the zarr store.
+
+        Args:
+            t: Timepoint index
+            fov_idx: FOV index (0-based)
+            z: Z-level index
+            channel: Channel name
+        """
+        # Map channel name to index
+        channel_idx = self._zarr_channel_map.get(channel, -1)
+        if channel_idx < 0:
+            logger.warning(f"Unknown channel '{channel}' in notify_zarr_frame")
+            return
+
+        # Emit signal for main thread handling
+        try:
+            self._zarr_frame_registered.emit(t, fov_idx, z, channel_idx)
+        except RuntimeError as e:
+            logger.warning(
+                "Could not emit zarr_frame_registered signal (viewer may be closed): %s",
+                e,
+            )
+
+    def _on_zarr_frame_registered(self, t: int, fov_idx: int, z: int, channel_idx: int):
+        """Handle zarr frame registration signal (runs on main thread).
+
+        Updates slider ranges and schedules debounced load if needed.
+        """
+        try:
+            # Update per-timepoint max FOV tracking
+            current_max_for_t = self._max_fov_per_time.get(t, -1)
+            if fov_idx > current_max_for_t:
+                self._max_fov_per_time[t] = fov_idx
+
+            # Compute max time
+            new_max_t = max(self._max_time_idx, t)
+
+            self._updating_sliders = True
+            try:
+                # Update T slider if needed
+                if new_max_t > self._max_time_idx:
+                    self._max_time_idx = new_max_t
+                    self._time_slider.setMaximum(new_max_t)
+
+                # Show T slider if we have multiple timepoints
+                if new_max_t > 0:
+                    self._time_container.setVisible(True)
+
+                # Update FOV slider max for CURRENT timepoint only
+                if t == self._current_time_idx:
+                    current_fov_max = self._fov_slider.maximum()
+                    available_fov_max = self._max_fov_per_time.get(t, 0)
+                    if available_fov_max > current_fov_max:
+                        self._fov_slider.setMaximum(available_fov_max)
+            finally:
+                self._updating_sliders = False
+
+            # Schedule debounced load if this frame is for the current FOV
+            if t == self._current_time_idx and fov_idx == self._current_fov_idx:
+                self._schedule_zarr_debounced_load()
+        except Exception as e:
+            logger.error("Error in _on_zarr_frame_registered: %s", e, exc_info=True)
+
+    def _schedule_zarr_debounced_load(self):
+        """Schedule a debounced load from the zarr store.
+
+        Coalesces rapid frame registrations into a single load every 200ms.
+        """
+        self._zarr_load_pending = True
+
+        if self._zarr_debounce_timer is None:
+            self._zarr_debounce_timer = QTimer(self)
+            self._zarr_debounce_timer.setSingleShot(True)
+            self._zarr_debounce_timer.timeout.connect(self._execute_zarr_debounced_load)
+
+        if not self._zarr_debounce_timer.isActive():
+            self._zarr_debounce_timer.start(200)  # 200ms debounce
+
+    def _execute_zarr_debounced_load(self):
+        """Execute the debounced zarr load."""
+        if self._zarr_load_pending:
+            self._zarr_load_pending = False
+            self._load_current_zarr_fov()
+
+    def _load_zarr_plane(
+        self, t: int, fov_idx: int, z: int, channel_idx: int
+    ) -> np.ndarray:
+        """Load a single plane from the zarr store.
+
+        Args:
+            t: Timepoint index
+            fov_idx: FOV index
+            z: Z-level index
+            channel_idx: Channel index
+
+        Returns:
+            Image plane as numpy array, or zeros if not available.
+        """
+        cache_key = ("zarr", t, fov_idx, z, channel_idx)
+
+        # Check cache first
+        cached_plane = self._plane_cache.get(cache_key)
+        if cached_plane is not None:
+            return cached_plane
+
+        # Try to open/reopen zarr store if needed
+        if self._zarr_acquisition_store is None and self._zarr_acquisition_path:
+            import zarr
+
+            try:
+                self._zarr_acquisition_store = zarr.open(
+                    str(self._zarr_acquisition_path), mode="r"
+                )
+            except Exception as e:
+                logger.debug("Could not open zarr store: %s", e)
+                return np.zeros(
+                    (self._image_height, self._image_width), dtype=np.uint16
+                )
+
+        if self._zarr_acquisition_store is None:
+            return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+        try:
+            store = self._zarr_acquisition_store
+            # Get data array (level 0 for highest resolution)
+            if "0" in store:
+                arr = store["0"]
+            else:
+                arr = store
+
+            # Read plane: typical zarr order is (T, C, Z, Y, X) or (T, FOV, C, Z, Y, X)
+            # Try different indexing based on array dimensions
+            ndim = len(arr.shape)
+            if ndim == 6:
+                # (T, FOV, C, Z, Y, X)
+                plane = arr[t, fov_idx, channel_idx, z, :, :]
+            elif ndim == 5:
+                # (T, C, Z, Y, X) - single FOV
+                plane = arr[t, channel_idx, z, :, :]
+            elif ndim == 4:
+                # (C, Z, Y, X) - single timepoint
+                plane = arr[channel_idx, z, :, :]
+            else:
+                logger.warning(f"Unexpected zarr dimensions: {arr.shape}")
+                return np.zeros(
+                    (self._image_height, self._image_width), dtype=np.uint16
+                )
+
+            plane = np.asarray(plane)
+            self._plane_cache.put(cache_key, plane)
+            return plane
+
+        except Exception as e:
+            logger.debug(
+                f"Failed to load zarr plane (t={t}, fov={fov_idx}, z={z}, ch={channel_idx}): {e}"
+            )
+            return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+    def _load_current_zarr_fov(self):
+        """Load and display data for the current FOV from zarr store.
+
+        Creates a lazy dask array that only loads planes when NDV requests them.
+        """
+        if not self._channel_names or not self._z_levels:
+            return
+        if self._image_height == 0 or self._image_width == 0:
+            return
+
+        t = self._current_time_idx
+        fov_idx = self._current_fov_idx
+        h, w = self._image_height, self._image_width
+
+        import dask
+        import dask.array as da
+
+        # Create lazy dask array
+        delayed_planes = []
+        for z in self._z_levels:
+            channel_planes = []
+            for c_idx in range(len(self._channel_names)):
+                delayed_load = dask.delayed(self._load_zarr_plane)(t, fov_idx, z, c_idx)
+                da_plane = da.from_delayed(delayed_load, shape=(h, w), dtype=np.uint16)
+                channel_planes.append(da_plane)
+            delayed_planes.append(da.stack(channel_planes))
+        data = da.stack(delayed_planes)
+
+        # Update NDV viewer data without rebuilding
+        self._update_ndv_data(data)
+
+    def end_zarr_acquisition(self):
+        """Mark zarr acquisition as ended.
+
+        Call this when acquisition completes. FOV labels are preserved
+        for post-acquisition navigation.
+        """
+        if self._zarr_debounce_timer and self._zarr_debounce_timer.isActive():
+            self._zarr_debounce_timer.stop()
+        self._zarr_load_pending = False
+
+        self._zarr_acquisition_active = False
+        # Keep zarr store open for browsing
+        logger.info("NDViewer: Zarr acquisition ended")
+
+    def is_zarr_push_mode_active(self) -> bool:
+        """Check if zarr push-based mode is active."""
+        return self._zarr_acquisition_active or self._zarr_acquisition_path is not None
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Legacy live refresh (kept for existing dataset viewing)
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -1706,6 +2312,11 @@ class LightweightViewer(QWidget):
             self._fov_play_timer.stop()
         if self._load_debounce_timer:
             self._load_debounce_timer.stop()
+        if self._zarr_debounce_timer:
+            self._zarr_debounce_timer.stop()
+        # Clean up zarr state
+        self._zarr_acquisition_store = None
+        self._zarr_acquisition_path = None
         self._close_open_handles()
         super().closeEvent(event)
 
@@ -1717,6 +2328,29 @@ class LightweightViewer(QWidget):
         """Return a cheap signature that changes when new data likely arrived."""
         base = Path(self.dataset_path)
         fmt = detect_format(base)
+
+        if fmt == "zarr_v3":
+            # For zarr v3, check .zattrs mtime and acquisition_complete flag
+            fovs, structure_type = discover_zarr_v3_fovs(base)
+            if not fovs:
+                return (fmt, 0, False, 0)
+
+            # Get first zarr path to check metadata
+            first_path = fovs[0]["path"]
+            zattrs_path = first_path / ".zattrs"
+
+            mtime_ns = 0
+            acquisition_complete = False
+            if zattrs_path.exists():
+                try:
+                    st = zattrs_path.stat()
+                    mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+                    meta = parse_zarr_v3_metadata(first_path)
+                    acquisition_complete = meta.get("acquisition_complete", False)
+                except Exception as e:
+                    logger.debug("Error reading zarr metadata: %s", e)
+
+            return (fmt, len(fovs), acquisition_complete, mtime_ns)
 
         if fmt == "single_tiff":
             tp_dirs = [d for d in base.iterdir() if d.is_dir() and d.name.isdigit()]
@@ -2045,6 +2679,15 @@ class LightweightViewer(QWidget):
             return None
 
         fmt = detect_format(base_path)
+
+        # Zarr v3 has its own FOV discovery
+        if fmt == "zarr_v3":
+            fovs, structure_type = discover_zarr_v3_fovs(base_path)
+            if not fovs:
+                print("No zarr v3 FOVs found")
+                return None
+            return self._load_zarr_v3(base_path, fovs, structure_type)
+
         fovs = self._discover_fovs(base_path, fmt)
 
         if not fovs:
@@ -2374,6 +3017,286 @@ class LightweightViewer(QWidget):
 
             traceback.print_exc()
             return None
+
+    def _load_zarr_v3(
+        self, base_path: Path, fovs: List[Dict], structure_type: str
+    ) -> Optional[xr.DataArray]:
+        """Load zarr v3 dataset (OME-NGFF format from Squid).
+
+        Args:
+            base_path: Dataset root directory
+            fovs: List of FOV dicts from discover_zarr_v3_fovs
+            structure_type: "hcs_plate", "per_fov", or "6d_single"
+
+        Returns:
+            xarray.DataArray with dims (time, fov, z, channel, y, x)
+        """
+        import zarr
+
+        try:
+            if structure_type == "6d_single":
+                return self._load_zarr_v3_6d(fovs[0]["path"])
+            else:
+                return self._load_zarr_v3_5d(fovs)
+        except Exception as e:
+            print(f"Zarr v3 load error: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return None
+
+    def _load_zarr_v3_5d(self, fovs: List[Dict]) -> Optional[xr.DataArray]:
+        """Load per-FOV zarr v3 stores and stack them.
+
+        Each FOV is a separate zarr store with dimensions (T, C, Z, Y, X).
+        Stacks them along a new FOV axis.
+        """
+        import zarr
+
+        if not fovs:
+            return None
+
+        # Parse metadata from first FOV
+        first_path = fovs[0]["path"]
+        meta = parse_zarr_v3_metadata(first_path)
+
+        # Open first zarr to get shape/dtype
+        try:
+            store = zarr.open(str(first_path), mode="r")
+            # Data is at level 0 (highest resolution)
+            if "0" in store:
+                arr = store["0"]
+            else:
+                arr = store
+            shape = arr.shape
+            dtype = arr.dtype
+        except Exception as e:
+            logger.error("Failed to open zarr store %s: %s", first_path, e)
+            return None
+
+        # Determine axis order from metadata or infer from shape
+        # Typical OME-NGFF order: (T, C, Z, Y, X)
+        axes = meta.get("axes", [])
+        if axes:
+            axis_names = [ax.get("name", "").lower() for ax in axes]
+        else:
+            # Infer from shape length
+            if len(shape) == 5:
+                axis_names = ["t", "c", "z", "y", "x"]
+            elif len(shape) == 4:
+                axis_names = ["c", "z", "y", "x"]
+            elif len(shape) == 3:
+                axis_names = ["z", "y", "x"]
+            else:
+                axis_names = ["y", "x"]
+
+        # Extract dimensions
+        n_t = shape[axis_names.index("t")] if "t" in axis_names else 1
+        n_c = shape[axis_names.index("c")] if "c" in axis_names else 1
+        n_z = shape[axis_names.index("z")] if "z" in axis_names else 1
+        n_y = shape[axis_names.index("y")] if "y" in axis_names else shape[-2]
+        n_x = shape[axis_names.index("x")] if "x" in axis_names else shape[-1]
+
+        # Build channel info
+        channel_names = meta.get("channel_names", [])
+        if not channel_names or len(channel_names) != n_c:
+            channel_names = [f"Ch{i}" for i in range(n_c)]
+
+        channel_colors = meta.get("channel_colors", [])
+        luts = {}
+        for i, name in enumerate(channel_names):
+            if i < len(channel_colors) and channel_colors[i]:
+                luts[i] = hex_to_colormap(channel_colors[i])
+            else:
+                luts[i] = wavelength_to_colormap(extract_wavelength(name))
+
+        # Create dask arrays for each FOV
+        fov_arrays = []
+        for fov_info in fovs:
+            fov_path = fov_info["path"]
+            try:
+                store = zarr.open(str(fov_path), mode="r")
+                if "0" in store:
+                    zarr_arr = store["0"]
+                else:
+                    zarr_arr = store
+
+                # Create dask array with per-plane chunks
+                chunks = tuple(
+                    1 if i < len(shape) - 2 else s for i, s in enumerate(shape)
+                )
+                darr = da.from_zarr(zarr_arr, chunks=chunks)
+
+                # Ensure shape is (T, C, Z, Y, X)
+                if len(darr.shape) == 4:
+                    darr = darr[np.newaxis, ...]  # Add T axis
+                elif len(darr.shape) == 3:
+                    darr = darr[np.newaxis, np.newaxis, ...]  # Add T and C axes
+
+                fov_arrays.append(darr)
+            except Exception as e:
+                logger.warning("Failed to load FOV %s: %s", fov_path, e)
+                # Create zeros placeholder
+                fov_arrays.append(
+                    da.zeros(
+                        (n_t, n_c, n_z, n_y, n_x),
+                        dtype=dtype,
+                        chunks=(1, 1, 1, n_y, n_x),
+                    )
+                )
+
+        # Stack FOVs: (n_fov, T, C, Z, Y, X)
+        stacked = da.stack(fov_arrays, axis=0)
+
+        # Transpose to (T, FOV, Z, C, Y, X) then reorder to standard dims
+        # Current: (FOV, T, C, Z, Y, X)
+        # Want: (T, FOV, Z, C, Y, X)
+        stacked = da.moveaxis(stacked, 0, 1)  # Now (T, FOV, C, Z, Y, X)
+        stacked = da.moveaxis(stacked, 3, 2)  # Now (T, FOV, Z, C, Y, X)
+
+        n_fov = len(fovs)
+        xarr = xr.DataArray(
+            stacked,
+            dims=["time", "fov", "z", "channel", "y", "x"],
+            coords={
+                "time": list(range(n_t)),
+                "fov": list(range(n_fov)),
+                "z": list(range(n_z)),
+                "channel": list(range(n_c)),
+            },
+        )
+        xarr.attrs["luts"] = luts
+        xarr.attrs["channel_names"] = channel_names
+
+        # Store physical sizes
+        if meta.get("pixel_size_um") is not None:
+            xarr.attrs["pixel_size_um"] = meta["pixel_size_um"]
+            xarr.attrs["pixel_size_x_um"] = meta["pixel_size_um"]
+            xarr.attrs["pixel_size_y_um"] = meta["pixel_size_um"]
+        if meta.get("dz_um") is not None:
+            xarr.attrs["dz_um"] = meta["dz_um"]
+            xarr.attrs["pixel_size_z_um"] = meta["dz_um"]
+
+        return xarr
+
+    def _load_zarr_v3_6d(self, zarr_path: Path) -> Optional[xr.DataArray]:
+        """Load a single 6D zarr v3 store with FOV dimension.
+
+        Handles zarr stores with dimensions like (T, FOV, C, Z, Y, X).
+        """
+        import zarr
+
+        meta = parse_zarr_v3_metadata(zarr_path)
+
+        try:
+            store = zarr.open(str(zarr_path), mode="r")
+            if "0" in store:
+                zarr_arr = store["0"]
+            else:
+                zarr_arr = store
+            shape = zarr_arr.shape
+            dtype = zarr_arr.dtype
+        except Exception as e:
+            logger.error("Failed to open zarr store %s: %s", zarr_path, e)
+            return None
+
+        # Determine axis order
+        axes = meta.get("axes", [])
+        if axes:
+            axis_names = [ax.get("name", "").lower() for ax in axes]
+        else:
+            # Infer from shape length
+            if len(shape) == 6:
+                axis_names = ["t", "fov", "c", "z", "y", "x"]
+            elif len(shape) == 5:
+                axis_names = ["t", "c", "z", "y", "x"]
+            else:
+                axis_names = (
+                    ["c", "z", "y", "x"] if len(shape) == 4 else ["z", "y", "x"]
+                )
+
+        # Normalize axis names
+        axis_map = {"position": "fov", "p": "fov", "time": "t"}
+        axis_names = [axis_map.get(n, n) for n in axis_names]
+
+        # Extract dimensions
+        def get_dim(name, default=1):
+            if name in axis_names:
+                return shape[axis_names.index(name)]
+            return default
+
+        n_t = get_dim("t")
+        n_fov = get_dim("fov")
+        n_c = get_dim("c")
+        n_z = get_dim("z")
+        n_y = get_dim("y", shape[-2])
+        n_x = get_dim("x", shape[-1])
+
+        # Build channel info
+        channel_names = meta.get("channel_names", [])
+        if not channel_names or len(channel_names) != n_c:
+            channel_names = [f"Ch{i}" for i in range(n_c)]
+
+        channel_colors = meta.get("channel_colors", [])
+        luts = {}
+        for i, name in enumerate(channel_names):
+            if i < len(channel_colors) and channel_colors[i]:
+                luts[i] = hex_to_colormap(channel_colors[i])
+            else:
+                luts[i] = wavelength_to_colormap(extract_wavelength(name))
+
+        # Create dask array with per-plane chunks
+        chunks = tuple(1 if i < len(shape) - 2 else s for i, s in enumerate(shape))
+        darr = da.from_zarr(zarr_arr, chunks=chunks)
+
+        # Transpose to standard order: (time, fov, z, channel, y, x)
+        # Build transpose order based on current axis order
+        target_order = ["t", "fov", "z", "c", "y", "x"]
+        current_order = axis_names
+
+        # Ensure all target axes exist
+        for ax in target_order:
+            if ax not in current_order:
+                # Add missing dimension
+                darr = darr[..., np.newaxis]
+                current_order.append(ax)
+
+        # Build transpose indices
+        transpose_idx = []
+        for ax in target_order:
+            if ax in current_order:
+                transpose_idx.append(current_order.index(ax))
+
+        if transpose_idx != list(range(len(transpose_idx))):
+            darr = da.transpose(darr, transpose_idx)
+
+        # Reshape if needed to ensure 6D
+        while len(darr.shape) < 6:
+            darr = darr[np.newaxis, ...]
+
+        xarr = xr.DataArray(
+            darr,
+            dims=["time", "fov", "z", "channel", "y", "x"],
+            coords={
+                "time": list(range(n_t)),
+                "fov": list(range(n_fov)),
+                "z": list(range(n_z)),
+                "channel": list(range(n_c)),
+            },
+        )
+        xarr.attrs["luts"] = luts
+        xarr.attrs["channel_names"] = channel_names
+
+        # Store physical sizes
+        if meta.get("pixel_size_um") is not None:
+            xarr.attrs["pixel_size_um"] = meta["pixel_size_um"]
+            xarr.attrs["pixel_size_x_um"] = meta["pixel_size_um"]
+            xarr.attrs["pixel_size_y_um"] = meta["pixel_size_um"]
+        if meta.get("dz_um") is not None:
+            xarr.attrs["dz_um"] = meta["dz_um"]
+            xarr.attrs["pixel_size_z_um"] = meta["dz_um"]
+
+        return xarr
 
     def _set_ndv_data(self, data: xr.DataArray):
         """Update NDV viewer with lazy array."""
