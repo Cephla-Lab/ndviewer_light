@@ -611,14 +611,14 @@ class TestOpenZarrTensorstore:
             assert len(arr.shape) == 5
 
     def test_open_zarr_v3_6d_shape(self):
-        """Test opening a 6D zarr array (T, FOV, C, Z, Y, X)."""
+        """Test opening a 6D zarr array (FOV, T, C, Z, Y, X)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             zarr_path = Path(tmpdir) / "acquisition.zarr"
             zarr_path.mkdir()
             _write_zarr_json(zarr_path)
 
             array_path = zarr_path / "0"
-            shape = (2, 4, 3, 5, 64, 64)  # T, FOV, C, Z, Y, X
+            shape = (4, 2, 3, 5, 64, 64)  # FOV, T, C, Z, Y, X
             self._create_zarr_v3_array(array_path, shape)
 
             arr = open_zarr_tensorstore(zarr_path, array_path="0")

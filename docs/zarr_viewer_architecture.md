@@ -113,8 +113,8 @@ The viewer auto-detects and handles three zarr layouts:
 | Structure | Description | Dimensions |
 |-----------|-------------|------------|
 | `per_fov` | One zarr per FOV (HCS plate or flat) | (T, C, Z, Y, X) per FOV |
-| `6d_single` | Single zarr with FOV dimension | (T, FOV, C, Z, Y, X) |
-| `6d_regions` | Multiple region zarrs | (T, FOV, C, Z, Y, X) per region |
+| `6d_single` | Single zarr with FOV dimension | (FOV, T, C, Z, Y, X) |
+| `6d_regions` | Multiple region zarrs | (FOV, T, C, Z, Y, X) per region |
 
 ## Push-Based API for Live Acquisition
 
