@@ -3355,7 +3355,6 @@ class LightweightViewer(QWidget):
             else:
                 zarr_arr = store
             shape = zarr_arr.shape
-            dtype = zarr_arr.dtype
         except Exception as e:
             logger.error("Failed to open zarr store %s: %s", zarr_path, e)
             return None
