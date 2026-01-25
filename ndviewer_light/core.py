@@ -2177,7 +2177,7 @@ class LightweightViewer(QWidget):
             f"{num_z} z-levels, {len(fov_labels)} FOVs at {zarr_path}"
         )
 
-    def start_zarr_acquisition_6d_regions(
+    def start_zarr_acquisition_6d(
         self,
         region_paths: List[str],
         channels: List[str],

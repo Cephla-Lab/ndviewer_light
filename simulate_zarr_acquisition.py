@@ -381,7 +381,7 @@ class ZarrAcquisitionSimulator:
         # Determine zarr path(s) for viewer
         if self.structure == "6d":
             # 6D mode (single or multi-region)
-            self.viewer.start_zarr_acquisition_6d_regions(
+            self.viewer.start_zarr_acquisition_6d(
                 region_paths=[str(p) for p in self.fov_paths],  # Region paths
                 channels=self.channels,
                 num_z=self.n_z,
