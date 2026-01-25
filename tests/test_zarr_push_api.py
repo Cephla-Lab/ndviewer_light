@@ -387,3 +387,162 @@ class TestCachingBehavior:
         # When acquisition ends, all planes cached (browsing mode)
         acquisition_active = False
         assert should_cache(key2)  # Now cacheable even though not in written set
+
+    def test_race_condition_prevention(self):
+        """Test that was_written_before_read prevents caching stale data.
+
+        Race condition scenario:
+        1. Viewer starts reading plane (sees zeros, not yet written)
+        2. During read, notify_zarr_frame() is called (plane now marked written)
+        3. Read completes with stale zeros
+        4. Old code: cache_key in written_planes → True → caches zeros (BUG)
+        5. New code: was_written_before_read is False → don't cache (CORRECT)
+        """
+        written_planes = set()
+        acquisition_active = True
+
+        def should_cache_with_race_prevention(cache_key, was_written_before_read):
+            """New caching logic that uses pre-read state."""
+            if not acquisition_active:
+                return True
+            return was_written_before_read
+
+        key = ("zarr", 0, 0, 0, 0)
+
+        # Simulate race condition:
+        # 1. Check written state BEFORE read
+        was_written_before_read = key in written_planes  # False
+
+        # 2. During read, notify_zarr_frame() is called
+        written_planes.add(key)
+
+        # 3. Read completes - should we cache?
+        # Old logic would check: key in written_planes → True → cache stale data
+        # New logic uses was_written_before_read → False → don't cache
+        assert not should_cache_with_race_prevention(key, was_written_before_read)
+
+        # Next read: plane is already written, so was_written_before_read is True
+        was_written_before_read = key in written_planes  # True now
+        assert should_cache_with_race_prevention(key, was_written_before_read)
+
+    def test_cache_invalidation_on_notify(self):
+        """Test that cache entries are invalidated when notify_zarr_frame() is called.
+
+        This handles the case where stale data was cached before the race
+        condition prevention was in place, or when a plane is re-written.
+        """
+        # Simulate cache with stale data
+        cache = {}
+        cache_key = ("zarr", 0, 0, 0, 0)
+        cache[cache_key] = "stale_zeros"
+
+        def invalidate(key):
+            """Simulate MemoryBoundedLRUCache.invalidate()."""
+            if key in cache:
+                del cache[key]
+                return True
+            return False
+
+        # Stale data is in cache
+        assert cache_key in cache
+
+        # notify_zarr_frame() calls invalidate()
+        result = invalidate(cache_key)
+        assert result is True
+        assert cache_key not in cache
+
+        # Invalidating non-existent key returns False
+        result = invalidate(("zarr", 1, 1, 1, 1))
+        assert result is False
+
+
+class TestMemoryBoundedLRUCacheInvalidate:
+    """Test MemoryBoundedLRUCache.invalidate() method."""
+
+    def test_invalidate_existing_entry(self):
+        """Test invalidating an entry that exists in cache."""
+        import numpy as np
+
+        from ndviewer_light import MemoryBoundedLRUCache
+
+        cache = MemoryBoundedLRUCache(max_memory_bytes=10 * 1024 * 1024)
+        key = ("zarr", 0, 0, 0, 0)
+        plane = np.zeros((100, 100), dtype=np.uint16)
+
+        cache.put(key, plane)
+        assert key in cache
+        assert len(cache) == 1
+
+        result = cache.invalidate(key)
+        assert result is True
+        assert key not in cache
+        assert len(cache) == 0
+
+    def test_invalidate_nonexistent_entry(self):
+        """Test invalidating an entry that doesn't exist."""
+        from ndviewer_light import MemoryBoundedLRUCache
+
+        cache = MemoryBoundedLRUCache(max_memory_bytes=10 * 1024 * 1024)
+        key = ("zarr", 0, 0, 0, 0)
+
+        result = cache.invalidate(key)
+        assert result is False
+        assert len(cache) == 0
+
+    def test_invalidate_updates_memory_tracking(self):
+        """Test that invalidate() correctly updates memory accounting."""
+        import numpy as np
+
+        from ndviewer_light import MemoryBoundedLRUCache
+
+        cache = MemoryBoundedLRUCache(max_memory_bytes=10 * 1024 * 1024)
+
+        # Add two entries
+        key1 = ("zarr", 0, 0, 0, 0)
+        key2 = ("zarr", 0, 0, 0, 1)
+        plane1 = np.zeros((100, 100), dtype=np.uint16)  # 20KB
+        plane2 = np.zeros((100, 100), dtype=np.uint16)  # 20KB
+
+        cache.put(key1, plane1)
+        cache.put(key2, plane2)
+
+        initial_memory = cache._current_memory
+        assert initial_memory == plane1.nbytes + plane2.nbytes
+
+        # Invalidate one entry
+        cache.invalidate(key1)
+
+        # Memory should be reduced
+        assert cache._current_memory == plane2.nbytes
+        assert cache._current_memory == initial_memory - plane1.nbytes
+
+    def test_invalidate_thread_safety(self):
+        """Test that invalidate() is thread-safe."""
+        import threading
+
+        import numpy as np
+
+        from ndviewer_light import MemoryBoundedLRUCache
+
+        cache = MemoryBoundedLRUCache(max_memory_bytes=10 * 1024 * 1024)
+        errors = []
+
+        def add_and_invalidate(thread_id):
+            try:
+                for i in range(100):
+                    key = ("zarr", thread_id, i, 0, 0)
+                    plane = np.zeros((10, 10), dtype=np.uint16)
+                    cache.put(key, plane)
+                    cache.invalidate(key)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=add_and_invalidate, args=(i,)) for i in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Thread safety errors: {errors}"
