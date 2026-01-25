@@ -2141,6 +2141,10 @@ class LightweightViewer(QWidget):
             height: Image height in pixels
             width: Image width in pixels
         """
+        # Validate inputs
+        if not fov_paths:
+            raise ValueError("fov_paths must not be empty")
+
         # Stop any running animations and pending loads
         self._stop_play_animation(self._time_play_timer, self._time_play_btn)
         self._stop_play_animation(self._fov_play_timer, self._fov_play_btn)
