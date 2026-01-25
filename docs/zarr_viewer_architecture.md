@@ -108,13 +108,17 @@ The actual pixel data only enters memory when displayed.
 
 ## Supported Zarr Structures
 
-The viewer auto-detects and handles three zarr layouts:
+The viewer auto-detects these zarr layouts when browsing existing data:
 
 | Structure | Description | Dimensions |
 |-----------|-------------|------------|
-| `per_fov` | One zarr per FOV (HCS plate or flat) | (T, C, Z, Y, X) per FOV |
-| `6d_single` | Single zarr with FOV dimension | (FOV, T, C, Z, Y, X) |
-| `6d_regions` | Multiple region zarrs | (FOV, T, C, Z, Y, X) per region |
+| `hcs_plate` | HCS plate structure (row/col/field) | (T, C, Z, Y, X) per FOV |
+| `per_fov` | One zarr per FOV (flat structure) | (T, C, Z, Y, X) per FOV |
+| `6d` | Single zarr with FOV dimension | (FOV, T, C, Z, Y, X) |
+
+For push-based live acquisition, use:
+- `start_zarr_acquisition()` - per_fov structure
+- `start_zarr_acquisition_6d()` - 6D structure (supports multiple regions)
 
 ## Push-Based API for Live Acquisition
 

@@ -298,7 +298,7 @@ class TestDiscoverZarrV3Fovs:
             assert fovs[0]["region"] == "region_1"
             assert fovs[0]["fov"] == 0
 
-    def test_discover_6d_single(self):
+    def test_discover_6d(self):
         """Test FOV discovery for 6D single store."""
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -309,7 +309,7 @@ class TestDiscoverZarrV3Fovs:
 
             fovs, structure_type = discover_zarr_v3_fovs(base)
 
-            assert structure_type == "6d_single"
+            assert structure_type == "6d"
             assert len(fovs) == 1
             assert fovs[0]["region"] == "region_1"
 
@@ -322,7 +322,7 @@ class TestDiscoverZarrV3Fovs:
 
             fovs, structure_type = discover_zarr_v3_fovs(base)
 
-            assert structure_type == "6d_single"
+            assert structure_type == "6d"
             assert len(fovs) == 1
             assert fovs[0]["path"] == base
 

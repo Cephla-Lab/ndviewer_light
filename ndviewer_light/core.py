@@ -1127,7 +1127,7 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
     Returns:
         Tuple of:
         - List of dicts: [{"region": str, "fov": int, "path": Path}, ...]
-        - Structure type: "hcs_plate", "per_fov", "6d_single", or "unknown"
+        - Structure type: "hcs_plate", "per_fov", "6d", or "unknown"
     """
     fovs = []
 
@@ -1200,7 +1200,7 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
             if acq_zarr.exists():
                 # This is a 6D single store - return just this one
                 fovs.append({"region": region_name, "fov": 0, "path": acq_zarr})
-                return fovs, "6d_single"
+                return fovs, "6d"
 
             # Look for fov_N.zarr or fov_N.ome.zarr files
             fov_pattern = re.compile(r"fov_(\d+)(?:\.ome)?\.zarr")
@@ -1221,7 +1221,7 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
         zarr_json = base_path / "zarr.json"
         if zarr_json.exists():
             fovs.append({"region": "default", "fov": 0, "path": base_path})
-            return fovs, "6d_single"
+            return fovs, "6d"
 
     return [], "unknown"
 
@@ -3482,13 +3482,13 @@ class LightweightViewer(QWidget):
         Args:
             base_path: Dataset root directory
             fovs: List of FOV dicts from discover_zarr_v3_fovs
-            structure_type: "hcs_plate", "per_fov", or "6d_single"
+            structure_type: "hcs_plate", "per_fov", or "6d"
 
         Returns:
             xarray.DataArray with dims (time, fov, z, channel, y, x)
         """
         try:
-            if structure_type == "6d_single":
+            if structure_type == "6d":
                 return self._load_zarr_v3_6d(fovs[0]["path"])
             else:
                 return self._load_zarr_v3_5d(fovs)
