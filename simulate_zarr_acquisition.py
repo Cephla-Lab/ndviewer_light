@@ -3,13 +3,14 @@ Simulate a live acquisition using the push-based zarr API.
 
 This script tests the zarr v3 push-based API with different zarr structures:
 - single: Simple 5D (T, C, Z, Y, X) - single region
-- 6d: 6D with FOV dimension (T, FOV, C, Z, Y, X)
+- 6d: 6D with FOV dimension (FOV, T, C, Z, Y, X), supports multi-region
 - per_fov: Separate zarr per FOV: zarr/region/fov_N.zarr
 - hcs: HCS plate format: plate.zarr/row/col/field/acquisition.zarr
 
 Usage:
     python simulate_zarr_acquisition.py --structure single
     python simulate_zarr_acquisition.py --structure 6d --n-fov 4
+    python simulate_zarr_acquisition.py --structure 6d --n-regions 3 --fovs-per-region 4 6 3
     python simulate_zarr_acquisition.py --structure per_fov --n-fov 4
     python simulate_zarr_acquisition.py --structure hcs --wells A1 A2 B1 B2 --fov-per-well 2
 """
@@ -49,6 +50,7 @@ _FONT_5X7: dict[str, list[str]] = {
     "C": ["#####", "#....", "#....", "#....", "#....", "#....", "#####"],
     "H": ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
     "Z": ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
+    "R": ["####.", "#...#", "#...#", "####.", "#..#.", "#...#", "#...#"],
     "=": [".....", "#####", ".....", "#####", ".....", ".....", "....."],
     " ": [".....", ".....", ".....", ".....", ".....", ".....", "....."],
     "-": [".....", ".....", ".....", "#####", ".....", ".....", "....."],
@@ -166,6 +168,8 @@ class ZarrAcquisitionSimulator:
         z_step_um: float = 1.5,
         wells: Optional[list[str]] = None,
         fov_per_well: int = 1,
+        n_regions: int = 1,
+        fovs_per_region: Optional[list[int]] = None,
     ):
         self.viewer = viewer
         self.output_path = output_path
@@ -182,12 +186,15 @@ class ZarrAcquisitionSimulator:
         self.z_step_um = z_step_um
         self.wells = wells or ["A1"]
         self.fov_per_well = fov_per_well
+        self.n_regions = n_regions
+        self.fovs_per_region = fovs_per_region or [n_fov]
 
         # Current position in acquisition
         self.current_t = 0
-        self.current_fov = 0
+        self.current_fov = 0  # Global FOV index
         self.current_z = 0
         self.current_c = 0
+        self.current_region = 0  # For 6d_regions: current region index
 
         # Precompute base image pattern
         y = np.arange(height, dtype=np.uint16)[:, None]
@@ -209,7 +216,31 @@ class ZarrAcquisitionSimulator:
 
     def _setup_fov_structure(self):
         """Set up FOV labels and paths based on structure type."""
-        if self.structure == "hcs":
+        if self.structure == "6d":
+            # 6D: each region has its own zarr with (FOV, T, C, Z, Y, X)
+            # Supports single region (n_regions=1) and multi-region
+            # Compute cumulative offsets for global→local FOV conversion
+            self.region_fov_offsets = []
+            offset = 0
+            for n_fov in self.fovs_per_region:
+                self.region_fov_offsets.append(offset)
+                offset += n_fov
+
+            # Generate flattened FOV labels and region paths
+            self.region_labels = [f"region_{i}" for i in range(self.n_regions)]
+            for region_idx, (region_label, n_fov) in enumerate(
+                zip(self.region_labels, self.fovs_per_region)
+            ):
+                for fov_in_region in range(n_fov):
+                    self.fov_labels.append(f"{region_label}:{fov_in_region}")
+                region_path = (
+                    self.output_path / "zarr" / region_label / "acquisition.zarr"
+                )
+                self.fov_paths.append(region_path)
+
+            self.n_fov = sum(self.fovs_per_region)
+
+        elif self.structure == "hcs":
             # HCS plate: plate.zarr/row/col/field/acquisition.zarr
             for well in self.wells:
                 row = well[0]  # e.g., "A"
@@ -237,18 +268,6 @@ class ZarrAcquisitionSimulator:
                 fov_path = self.output_path / "zarr" / "region_1" / f"fov_{i}.zarr"
                 self.fov_paths.append(fov_path)
 
-        elif self.structure == "6d":
-            # 6D single store with FOV dimension
-            for i in range(self.n_fov):
-                well_idx = i // max(1, self.n_fov // len(self.wells))
-                well = self.wells[well_idx % len(self.wells)]
-                fov_in_well = i % max(1, self.n_fov // len(self.wells))
-                self.fov_labels.append(f"{well}:{fov_in_well}")
-            # Single path for all FOVs
-            self.fov_paths = [
-                self.output_path / "zarr" / "region_1" / "acquisition.zarr"
-            ]
-
         else:  # single
             # Simple 5D single store
             self.fov_labels = ["A1:0"]
@@ -261,7 +280,45 @@ class ZarrAcquisitionSimulator:
         """Create zarr stores based on structure type."""
         n_c = len(self.channels)
 
-        if self.structure == "single":
+        if self.structure == "6d":
+            # 6D: each region has its own store with (FOV, T, C, Z, Y, X)
+            for region_idx, (region_label, n_fov_in_region) in enumerate(
+                zip(self.region_labels, self.fovs_per_region)
+            ):
+                zarr_path = self.fov_paths[region_idx]  # fov_paths holds region paths
+                zarr_path.mkdir(parents=True, exist_ok=True)
+                store = zarr.open(str(zarr_path), mode="w")
+                # Shape: (FOV, T, C, Z, Y, X)
+                shape = (n_fov_in_region, self.n_t, n_c, self.n_z, self.height, self.width)
+                chunks = (1, 1, 1, 1, self.height, self.width)
+                arr = store.create_dataset(
+                    "0", shape=shape, chunks=chunks, dtype=np.uint16, overwrite=True
+                )
+                self.zarr_stores[region_idx] = store
+                self.zarr_arrays[region_idx] = arr
+                _write_zattrs(
+                    zarr_path,
+                    self.channels,
+                    self.channel_colors,
+                    self.pixel_size_um,
+                    self.z_step_um,
+                    axes=[
+                        {"name": "fov", "type": "position"},
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "z", "type": "space", "unit": "micrometer"},
+                        {"name": "y", "type": "space", "unit": "micrometer"},
+                        {"name": "x", "type": "space", "unit": "micrometer"},
+                    ],
+                    scale=[1, 1, 1, self.z_step_um, self.pixel_size_um, self.pixel_size_um],
+                )
+            print(f"Created 6D zarr stores: {self.n_regions} regions")
+            for i, (label, n_fov) in enumerate(
+                zip(self.region_labels, self.fovs_per_region)
+            ):
+                print(f"  [{i}] {label}: {n_fov} FOVs at {self.fov_paths[i]}")
+
+        elif self.structure == "single":
             # Single 5D store: (T, C, Z, Y, X)
             zarr_path = self.fov_paths[0]
             zarr_path.mkdir(parents=True, exist_ok=True)
@@ -281,37 +338,6 @@ class ZarrAcquisitionSimulator:
                 self.z_step_um,
             )
             print(f"Created single 5D zarr at {zarr_path}")
-            print(f"  Shape: {shape}")
-
-        elif self.structure == "6d":
-            # Single 6D store: (T, FOV, C, Z, Y, X)
-            zarr_path = self.fov_paths[0]
-            zarr_path.mkdir(parents=True, exist_ok=True)
-            store = zarr.open(str(zarr_path), mode="w")
-            shape = (self.n_t, self.n_fov, n_c, self.n_z, self.height, self.width)
-            chunks = (1, 1, 1, 1, self.height, self.width)
-            arr = store.create_dataset(
-                "0", shape=shape, chunks=chunks, dtype=np.uint16, overwrite=True
-            )
-            self.zarr_stores[0] = store
-            self.zarr_arrays[0] = arr
-            _write_zattrs(
-                zarr_path,
-                self.channels,
-                self.channel_colors,
-                self.pixel_size_um,
-                self.z_step_um,
-                axes=[
-                    {"name": "t", "type": "time"},
-                    {"name": "fov", "type": "position"},
-                    {"name": "c", "type": "channel"},
-                    {"name": "z", "type": "space", "unit": "micrometer"},
-                    {"name": "y", "type": "space", "unit": "micrometer"},
-                    {"name": "x", "type": "space", "unit": "micrometer"},
-                ],
-                scale=[1, 1, 1, self.z_step_um, self.pixel_size_um, self.pixel_size_um],
-            )
-            print(f"Created 6D zarr at {zarr_path}")
             print(f"  Shape: {shape}")
 
         elif self.structure in ("per_fov", "hcs"):
@@ -353,7 +379,18 @@ class ZarrAcquisitionSimulator:
         self._create_zarr_stores()
 
         # Determine zarr path(s) for viewer
-        if self.structure in ("per_fov", "hcs"):
+        if self.structure == "6d":
+            # 6D mode (single or multi-region)
+            self.viewer.start_zarr_acquisition_6d_regions(
+                region_paths=[str(p) for p in self.fov_paths],  # Region paths
+                channels=self.channels,
+                num_z=self.n_z,
+                fovs_per_region=self.fovs_per_region,
+                height=self.height,
+                width=self.width,
+                region_labels=self.region_labels,
+            )
+        elif self.structure in ("per_fov", "hcs"):
             # Per-FOV mode: pass list of paths
             self.viewer.start_zarr_acquisition(
                 zarr_path="",  # Not used in per-FOV mode
@@ -378,6 +415,18 @@ class ZarrAcquisitionSimulator:
         # Start writing
         self.timer.start(self.interval_ms)
 
+    def _global_to_region_fov(self, global_fov_idx: int) -> tuple[int, int]:
+        """Convert global FOV index to (region_idx, local_fov_idx)."""
+        for region_idx, offset in enumerate(self.region_fov_offsets):
+            next_offset = (
+                self.region_fov_offsets[region_idx + 1]
+                if region_idx + 1 < len(self.region_fov_offsets)
+                else self.n_fov
+            )
+            if offset <= global_fov_idx < next_offset:
+                return region_idx, global_fov_idx - offset
+        return 0, global_fov_idx  # fallback
+
     def _write_next_plane(self):
         """Write a single plane, then advance to next position."""
         if self.current_t >= self.n_t:
@@ -385,7 +434,7 @@ class ZarrAcquisitionSimulator:
             return
 
         t = self.current_t
-        fov = self.current_fov
+        fov = self.current_fov  # Global FOV index
         z = self.current_z
         c = self.current_c
         ch_name = self.channels[c]
@@ -400,25 +449,32 @@ class ZarrAcquisitionSimulator:
         _draw_text(img, label, x=20, y=20, scale=10, value=60000)
 
         # Write to appropriate zarr array based on structure
-        if self.structure == "single":
+        if self.structure == "6d":
+            # 6D: convert global FOV to region + local FOV
+            region_idx, local_fov_idx = self._global_to_region_fov(fov)
+            # (FOV, T, C, Z, Y, X)
+            self.zarr_arrays[region_idx][local_fov_idx, t, c, z, :, :] = img
+            # Notify with region_idx
+            self.viewer.notify_zarr_frame(
+                t=t,
+                fov_idx=local_fov_idx,
+                z=z,
+                channel=ch_name,
+                region_idx=region_idx,
+            )
+            print(
+                f"[t={t}] Region {region_idx} FOV {local_fov_idx} ({fov_label}) z={z} ch={ch_name}"
+            )
+        elif self.structure == "single":
             # (T, C, Z, Y, X)
             self.zarr_arrays[0][t, c, z, :, :] = img
-        elif self.structure == "6d":
-            # (T, FOV, C, Z, Y, X)
-            self.zarr_arrays[0][t, fov, c, z, :, :] = img
+            self.viewer.notify_zarr_frame(t=t, fov_idx=fov, z=z, channel=ch_name)
+            print(f"[t={t}] FOV {fov} ({fov_label}) z={z} ch={ch_name}")
         else:
             # per_fov or hcs: each FOV has its own array (T, C, Z, Y, X)
             self.zarr_arrays[fov][t, c, z, :, :] = img
-
-        # Notify viewer (push-based zarr API)
-        self.viewer.notify_zarr_frame(
-            t=t,
-            fov_idx=fov,
-            z=z,
-            channel=ch_name,
-        )
-
-        print(f"[t={t}] FOV {fov} ({fov_label}) z={z} ch={ch_name}")
+            self.viewer.notify_zarr_frame(t=t, fov_idx=fov, z=z, channel=ch_name)
+            print(f"[t={t}] FOV {fov} ({fov_label}) z={z} ch={ch_name}")
 
         # Advance to next plane: cycle through channels, then z, then FOV, then time
         self.current_c += 1
@@ -448,8 +504,11 @@ class ZarrAcquisitionSimulator:
 
     def _mark_acquisition_complete(self):
         """Update .zattrs files to mark acquisition as complete."""
-        if self.structure in ("single", "6d"):
+        if self.structure == "single":
             paths_to_update = [self.fov_paths[0] / ".zattrs"]
+        elif self.structure == "6d":
+            # 6d: fov_paths contains region paths
+            paths_to_update = [p / ".zattrs" for p in self.fov_paths]
         else:
             paths_to_update = [p / ".zattrs" for p in self.fov_paths]
 
@@ -474,8 +533,11 @@ Examples:
   # Single 5D zarr (simplest)
   python simulate_zarr_acquisition.py --structure single
 
-  # 6D zarr with FOV dimension
+  # 6D zarr with FOV dimension (single region)
   python simulate_zarr_acquisition.py --structure 6d --n-fov 4
+
+  # 6D multi-region (variable FOVs per region)
+  python simulate_zarr_acquisition.py --structure 6d --n-regions 3 --fovs-per-region 4 6 3
 
   # Per-FOV zarr stores
   python simulate_zarr_acquisition.py --structure per_fov --n-fov 4
@@ -494,7 +556,8 @@ Examples:
         "--structure",
         choices=["single", "6d", "per_fov", "hcs"],
         default="single",
-        help="Zarr structure type (default: single).",
+        help="Zarr structure type (default: single). "
+        "6d supports multi-region via --n-regions and --fovs-per-region.",
     )
     ap.add_argument(
         "--interval",
@@ -556,6 +619,21 @@ Examples:
         default=2,
         help="FOVs per well for HCS structure (default: 2).",
     )
+    # 6d_regions-specific options
+    ap.add_argument(
+        "--n-regions",
+        type=int,
+        default=3,
+        help="Number of regions for 6d_regions structure (default: 3).",
+    )
+    ap.add_argument(
+        "--fovs-per-region",
+        nargs="*",
+        type=int,
+        default=None,
+        help="FOV count per region for 6d_regions (e.g., --fovs-per-region 4 6 3). "
+        "If not specified, uses --n-fov for all regions.",
+    )
     args = ap.parse_args()
 
     if len(args.channels) != args.n_ch:
@@ -571,6 +649,20 @@ Examples:
             file=sys.stderr,
         )
         return 2
+
+    # Handle 6d arguments (supports multi-region)
+    fovs_per_region = args.fovs_per_region
+    if args.structure == "6d":
+        if fovs_per_region is None:
+            # Default: use n_fov for each region
+            fovs_per_region = [args.n_fov] * args.n_regions
+        elif len(fovs_per_region) != args.n_regions:
+            print(
+                f"Error: --fovs-per-region length ({len(fovs_per_region)}) must match "
+                f"--n-regions ({args.n_regions}).",
+                file=sys.stderr,
+            )
+            return 2
 
     if args.output_path is None:
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -604,6 +696,8 @@ Examples:
         z_step_um=args.z_step,
         wells=args.wells,
         fov_per_well=args.fov_per_well,
+        n_regions=args.n_regions,
+        fovs_per_region=fovs_per_region,
     )
 
     # Start acquisition after event loop starts

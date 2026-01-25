@@ -1410,6 +1410,13 @@ class LightweightViewer(QWidget):
         self._zarr_fov_paths: List[Path] = []  # [fov0_path, fov1_path, ...]
         self._zarr_fov_stores: Dict[int, Any] = {}  # fov_idx -> zarr store
 
+        # For 6d_regions structure: each region has its own 6D zarr with variable FOV count
+        self._zarr_region_paths: List[Path] = []  # [region0.zarr, region1.zarr, ...]
+        self._zarr_region_stores: Dict[int, Any] = {}  # region_idx -> zarr store
+        self._fovs_per_region: List[int] = []  # [4, 6, 3] - variable per region
+        self._region_fov_offsets: List[int] = []  # [0, 4, 10] - cumulative offsets
+        self._zarr_6d_regions_mode: bool = False
+
         # Connect signals for thread-safe updates
         self._image_registered.connect(self._on_image_registered)
         self._zarr_frame_registered.connect(self._on_zarr_frame_registered)
@@ -2083,6 +2090,12 @@ class LightweightViewer(QWidget):
         # Close any existing zarr stores
         self._zarr_acquisition_store = None
         self._zarr_fov_stores.clear()
+        # Also clear 6D regions state (in case switching modes)
+        self._zarr_region_stores.clear()
+        self._zarr_region_paths = []
+        self._fovs_per_region = []
+        self._region_fov_offsets = []
+        self._zarr_6d_regions_mode = False
 
         # Clear previous state
         self._plane_cache.clear()
@@ -2164,7 +2177,162 @@ class LightweightViewer(QWidget):
             f"{num_z} z-levels, {len(fov_labels)} FOVs at {zarr_path}"
         )
 
-    def notify_zarr_frame(self, t: int, fov_idx: int, z: int, channel: str):
+    def start_zarr_acquisition_6d_regions(
+        self,
+        region_paths: List[str],
+        channels: List[str],
+        num_z: int,
+        fovs_per_region: List[int],
+        height: int,
+        width: int,
+        region_labels: Optional[List[str]] = None,
+    ):
+        """Configure viewer for multi-region 6D zarr-based live acquisition.
+
+        Each region has its own zarr file with shape (FOV, T, C, Z, Y, X).
+        FOVs are flattened across regions with labels showing "region:fov" format.
+
+        Args:
+            region_paths: Paths to zarr stores, one per region
+            channels: Channel names, e.g. ["DAPI", "GFP", "RFP"]
+            num_z: Number of z-levels
+            fovs_per_region: Number of FOVs per region, e.g. [4, 6, 3]
+            height: Image height in pixels
+            width: Image width in pixels
+            region_labels: Optional region labels (auto-generated if not provided)
+        """
+        import zarr
+
+        # Stop any running animations and pending loads
+        self._stop_play_animation(self._time_play_timer, self._time_play_btn)
+        self._stop_play_animation(self._fov_play_timer, self._fov_play_btn)
+        if self._zarr_debounce_timer and self._zarr_debounce_timer.isActive():
+            self._zarr_debounce_timer.stop()
+        self._zarr_load_pending = False
+
+        # Close any existing zarr stores
+        self._zarr_acquisition_store = None
+        self._zarr_fov_stores.clear()
+        self._zarr_region_stores.clear()
+
+        # Clear previous state
+        self._plane_cache.clear()
+        self._max_fov_per_time.clear()
+
+        # Validate inputs
+        if not region_paths:
+            raise ValueError("region_paths must not be empty")
+        if not fovs_per_region or not all(n > 0 for n in fovs_per_region):
+            raise ValueError("fovs_per_region must be non-empty with positive values")
+        if len(region_paths) != len(fovs_per_region):
+            raise ValueError(
+                f"region_paths length ({len(region_paths)}) must match "
+                f"fovs_per_region length ({len(fovs_per_region)})"
+            )
+
+        # Store configuration
+        self._channel_names = list(channels)
+        self._z_levels = list(range(num_z))
+        self._image_height = height
+        self._image_width = width
+
+        # Store region-specific state
+        self._zarr_region_paths = [Path(p) for p in region_paths]
+        self._fovs_per_region = list(fovs_per_region)
+
+        # Compute cumulative FOV offsets for global→local conversion
+        # Example: fovs_per_region=[4, 6, 3] → offsets=[0, 4, 10]
+        self._region_fov_offsets = []
+        offset = 0
+        for n_fov in fovs_per_region:
+            self._region_fov_offsets.append(offset)
+            offset += n_fov
+
+        # Generate region labels if not provided
+        if region_labels is None:
+            region_labels = [f"region_{i}" for i in range(len(region_paths))]
+
+        # Generate flattened FOV labels: ["region_0:0", "region_0:1", ..., "region_1:0", ...]
+        self._fov_labels = []
+        for region_idx, (region_label, n_fov) in enumerate(
+            zip(region_labels, fovs_per_region)
+        ):
+            for fov_in_region in range(n_fov):
+                self._fov_labels.append(f"{region_label}:{fov_in_region}")
+
+        # Build channel name to index map
+        self._zarr_channel_map = {name: i for i, name in enumerate(self._channel_names)}
+
+        # Set up LUTs based on channel wavelengths
+        self._luts = {
+            i: wavelength_to_colormap(extract_wavelength(c))
+            for i, c in enumerate(self._channel_names)
+        }
+
+        # Clear single-store state (not used in 6d_regions mode)
+        self._zarr_acquisition_path = None
+        self._zarr_fov_paths = []
+
+        # Enable 6d_regions mode
+        self._zarr_6d_regions_mode = True
+
+        # Reset navigation state
+        self._current_fov_idx = 0
+        self._current_time_idx = 0
+        self._max_time_idx = 0
+        self._zarr_acquisition_active = True
+
+        # Update sliders
+        total_fovs = sum(fovs_per_region)
+        self._updating_sliders = True
+        try:
+            self._time_slider.setMaximum(0)
+            self._time_slider.setValue(0)
+            self._time_label.setText("T: 0")
+
+            self._fov_slider.setMaximum(max(0, total_fovs - 1))
+            self._fov_slider.setValue(0)
+            if self._fov_labels:
+                self._fov_label.setText(f"FOV: {self._fov_labels[0]}")
+            else:
+                self._fov_label.setText("FOV: -")
+        finally:
+            self._updating_sliders = False
+
+        # Rebuild NDV viewer with channel configuration
+        self._rebuild_viewer_for_acquisition()
+
+        # Show/hide FOV slider based on number of FOVs
+        self._update_fov_slider_visibility()
+
+        logger.info(
+            f"NDViewer: Started 6D regions zarr acquisition with {len(channels)} channels, "
+            f"{num_z} z-levels, {len(region_paths)} regions, {total_fovs} total FOVs"
+        )
+
+    def _global_to_region_fov(self, global_fov_idx: int) -> Tuple[int, int]:
+        """Convert global FOV index to (region_idx, local_fov_idx).
+
+        Args:
+            global_fov_idx: Global FOV index (0 to total_fovs-1)
+
+        Returns:
+            Tuple of (region_idx, local_fov_idx within that region)
+        """
+        total_fovs = sum(self._fovs_per_region)
+        for region_idx, offset in enumerate(self._region_fov_offsets):
+            next_offset = (
+                self._region_fov_offsets[region_idx + 1]
+                if region_idx + 1 < len(self._region_fov_offsets)
+                else total_fovs
+            )
+            if offset <= global_fov_idx < next_offset:
+                return region_idx, global_fov_idx - offset
+        return 0, global_fov_idx  # fallback
+
+    def notify_zarr_frame(
+        self, t: int, fov_idx: int, z: int, channel: str, region_idx: int = 0
+    ):
         """Notify viewer that a new frame was written to the zarr store.
 
         Thread-safe: can be called from acquisition worker thread.
@@ -2172,9 +2340,11 @@ class LightweightViewer(QWidget):
 
         Args:
             t: Timepoint index
-            fov_idx: FOV index (0-based)
+            fov_idx: FOV index within region (0-based). For non-region modes, this
+                     is the global FOV index.
             z: Z-level index
             channel: Channel name
+            region_idx: Region index for 6d_regions mode (default 0 for backward compat)
         """
         # Map channel name to index
         channel_idx = self._zarr_channel_map.get(channel, -1)
@@ -2182,9 +2352,19 @@ class LightweightViewer(QWidget):
             logger.warning(f"Unknown channel '{channel}' in notify_zarr_frame")
             return
 
+        # Convert to global FOV index for 6d_regions mode
+        global_fov_idx = fov_idx
+        if self._zarr_6d_regions_mode and self._region_fov_offsets:
+            if region_idx < len(self._region_fov_offsets):
+                global_fov_idx = self._region_fov_offsets[region_idx] + fov_idx
+            else:
+                logger.warning(
+                    f"Invalid region_idx {region_idx} (max: {len(self._region_fov_offsets) - 1})"
+                )
+
         # Emit signal for main thread handling
         try:
-            self._zarr_frame_registered.emit(t, fov_idx, z, channel_idx)
+            self._zarr_frame_registered.emit(t, global_fov_idx, z, channel_idx)
         except RuntimeError as e:
             logger.warning(
                 "Could not emit zarr_frame_registered signal (viewer may be closed): %s",
@@ -2278,7 +2458,72 @@ class LightweightViewer(QWidget):
         # Determine which store to use based on mode
         store = None
 
-        if self._zarr_fov_paths:
+        if self._zarr_6d_regions_mode:
+            # 6D regions mode: each region has its own store with (FOV, T, C, Z, Y, X)
+            region_idx, local_fov_idx = self._global_to_region_fov(fov_idx)
+
+            if region_idx >= len(self._zarr_region_paths):
+                logger.warning(
+                    f"Region index {region_idx} out of range "
+                    f"(max: {len(self._zarr_region_paths) - 1})"
+                )
+                return np.zeros(
+                    (self._image_height, self._image_width), dtype=np.uint16
+                )
+
+            # Get or open the store for this region (lazy loading)
+            if region_idx not in self._zarr_region_stores:
+                try:
+                    self._zarr_region_stores[region_idx] = zarr.open(
+                        str(self._zarr_region_paths[region_idx]), mode="r"
+                    )
+                except (FileNotFoundError, PermissionError) as e:
+                    logger.debug(
+                        f"Zarr store not accessible for region {region_idx}: {e}"
+                    )
+                    return np.zeros(
+                        (self._image_height, self._image_width), dtype=np.uint16
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Could not open zarr store for region {region_idx}: {e}"
+                    )
+                    return np.zeros(
+                        (self._image_height, self._image_width), dtype=np.uint16
+                    )
+
+            store = self._zarr_region_stores[region_idx]
+
+            # Read from 6D array: (FOV, T, C, Z, Y, X)
+            try:
+                if "0" in store:
+                    arr = store["0"]
+                else:
+                    arr = store
+
+                # Index 6D: (FOV, T, C, Z, Y, X) → arr[fov, t, c, z, :, :]
+                plane = arr[local_fov_idx, t, channel_idx, z, :, :]
+                plane = np.asarray(plane)
+                self._plane_cache.put(cache_key, plane)
+                return plane
+            except (IndexError, KeyError) as e:
+                logger.debug(
+                    f"Zarr plane not available (region={region_idx}, fov={local_fov_idx}, "
+                    f"t={t}, z={z}, ch={channel_idx}): {e}"
+                )
+                return np.zeros(
+                    (self._image_height, self._image_width), dtype=np.uint16
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load zarr plane (region={region_idx}, fov={local_fov_idx}, "
+                    f"t={t}, z={z}, ch={channel_idx}): {e}"
+                )
+                return np.zeros(
+                    (self._image_height, self._image_width), dtype=np.uint16
+                )
+
+        elif self._zarr_fov_paths:
             # Per-FOV mode: each FOV has its own store
             if fov_idx >= len(self._zarr_fov_paths):
                 logger.warning(
@@ -2423,6 +2668,7 @@ class LightweightViewer(QWidget):
             self._zarr_acquisition_active
             or self._zarr_acquisition_path is not None
             or bool(self._zarr_fov_paths)
+            or self._zarr_6d_regions_mode
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2469,6 +2715,12 @@ class LightweightViewer(QWidget):
         self._zarr_acquisition_path = None
         self._zarr_fov_stores.clear()
         self._zarr_fov_paths = []
+        # Clean up 6d_regions state
+        self._zarr_region_stores.clear()
+        self._zarr_region_paths = []
+        self._fovs_per_region = []
+        self._region_fov_offsets = []
+        self._zarr_6d_regions_mode = False
         self._close_open_handles()
         super().closeEvent(event)
 
