@@ -2558,7 +2558,8 @@ class LightweightViewer(QWidget):
                     logger.debug(
                         f"Opening zarr store for region {region_idx}: {region_path}"
                     )
-                    ts_arr = open_zarr_tensorstore(region_path, array_path="0")
+                    # 6D mode: array is directly at acquisition.zarr, not at /0
+                    ts_arr = open_zarr_tensorstore(region_path, array_path="")
                     if ts_arr is None:
                         logger.debug(
                             f"Zarr store not accessible for region {region_idx}"
@@ -2699,6 +2700,17 @@ class LightweightViewer(QWidget):
                 if self._zarr_acquisition_active:
                     QTimer.singleShot(500, self._load_current_zarr_fov)
                 return
+
+        # Check if store is ready for 6D regions mode
+        if self._zarr_6d_regions_mode and self._zarr_region_paths:
+            region_idx, _ = self._global_to_region_fov(fov_idx)
+            if region_idx < len(self._zarr_region_paths):
+                zarr_json = self._zarr_region_paths[region_idx] / "zarr.json"
+                if not zarr_json.exists():
+                    # Store not ready yet, retry later
+                    if self._zarr_acquisition_active:
+                        QTimer.singleShot(500, self._load_current_zarr_fov)
+                    return
 
         import dask
         import dask.array as da
