@@ -1477,6 +1477,9 @@ class LightweightViewer(QWidget):
         self._zarr_written_planes: Set[Tuple] = (
             set()
         )  # Track written planes during live acquisition
+        self._zarr_written_planes_lock = (
+            threading.Lock()
+        )  # Protects _zarr_written_planes
 
         # Connect signals for thread-safe updates
         self._image_registered.connect(self._on_image_registered)
@@ -2159,7 +2162,8 @@ class LightweightViewer(QWidget):
         # Clear previous state
         self._plane_cache.clear()
         self._max_fov_per_time.clear()
-        self._zarr_written_planes.clear()
+        with self._zarr_written_planes_lock:
+            self._zarr_written_planes.clear()
 
         # Store configuration
         self._channel_names = list(channels)
@@ -2270,7 +2274,8 @@ class LightweightViewer(QWidget):
         # Clear previous state
         self._plane_cache.clear()
         self._max_fov_per_time.clear()
-        self._zarr_written_planes.clear()
+        with self._zarr_written_planes_lock:
+            self._zarr_written_planes.clear()
 
         # Validate inputs
         if not region_paths:
@@ -2419,7 +2424,8 @@ class LightweightViewer(QWidget):
 
         # Track this plane as written (for cache eligibility)
         cache_key = ("zarr", t, global_fov_idx, z, channel_idx)
-        self._zarr_written_planes.add(cache_key)
+        with self._zarr_written_planes_lock:
+            self._zarr_written_planes.add(cache_key)
 
         # Invalidate any cached entry for this plane. This handles the race condition
         # where the viewer read zeros before the data was flushed to disk.
@@ -2521,7 +2527,8 @@ class LightweightViewer(QWidget):
         # Record if plane was marked as written BEFORE we read. This prevents a race
         # where notify_zarr_frame is called during our read - we shouldn't cache
         # potentially stale data that was read before the notification.
-        was_written_before_read = cache_key in self._zarr_written_planes
+        with self._zarr_written_planes_lock:
+            was_written_before_read = cache_key in self._zarr_written_planes
 
         # Determine which store to use based on mode
         arr = None
@@ -2776,7 +2783,8 @@ class LightweightViewer(QWidget):
         self._fovs_per_region = []
         self._region_fov_offsets = []
         self._zarr_6d_regions_mode = False
-        self._zarr_written_planes.clear()
+        with self._zarr_written_planes_lock:
+            self._zarr_written_planes.clear()
         self._close_open_handles()
         super().closeEvent(event)
 

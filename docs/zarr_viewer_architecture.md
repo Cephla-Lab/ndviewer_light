@@ -129,8 +129,8 @@ Channel switching benefits most because users typically cycle through the same c
 
 ### Configuration
 
-- Default size: 500 MB
-- Holds ~250 planes at 1024x1024, or ~62 planes at 2048x2048
+- Default size: 256 MB
+- Holds ~128 planes at 1024x1024, or ~32 planes at 2048x2048
 - LRU eviction when limit is reached
 
 ### Race Condition Handling
