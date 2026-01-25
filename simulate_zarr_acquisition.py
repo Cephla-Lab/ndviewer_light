@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import zarr
+import tensorstore as ts
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
 
@@ -210,9 +210,8 @@ class ZarrAcquisitionSimulator:
         self.timer = QTimer()
         self.timer.timeout.connect(self._write_next_plane)
 
-        # Zarr store handles
-        self.zarr_stores = {}  # fov_idx -> zarr store
-        self.zarr_arrays = {}  # fov_idx -> zarr array
+        # Tensorstore array handles (fov_idx or region_idx -> ts.TensorStore)
+        self.zarr_arrays = {}
 
     def _setup_fov_structure(self):
         """Set up FOV labels and paths based on structure type."""
@@ -276,8 +275,29 @@ class ZarrAcquisitionSimulator:
             if not str(self.output_path).endswith(".zarr"):
                 self.fov_paths = [self.output_path.with_suffix(".zarr")]
 
+    def _create_tensorstore_array(
+        self, path: Path, shape: tuple, chunks: tuple
+    ) -> ts.TensorStore:
+        """Create a zarr v3 array using tensorstore."""
+        spec = {
+            "driver": "zarr3",
+            "kvstore": {"driver": "file", "path": str(path)},
+            "create": True,
+            "delete_existing": True,
+            "schema": {
+                "dtype": "uint16",
+                "domain": {"shape": list(shape)},
+                "chunk_layout": {
+                    "grid_origin": [0] * len(shape),
+                    "inner_order": list(range(len(shape) - 1, -1, -1)),
+                    "chunk": {"shape": list(chunks)},
+                },
+            },
+        }
+        return ts.open(spec).result()
+
     def _create_zarr_stores(self):
-        """Create zarr stores based on structure type."""
+        """Create zarr v3 stores using tensorstore based on structure type."""
         n_c = len(self.channels)
 
         if self.structure == "6d":
@@ -287,14 +307,10 @@ class ZarrAcquisitionSimulator:
             ):
                 zarr_path = self.fov_paths[region_idx]  # fov_paths holds region paths
                 zarr_path.mkdir(parents=True, exist_ok=True)
-                store = zarr.open(str(zarr_path), mode="w")
                 # Shape: (FOV, T, C, Z, Y, X)
                 shape = (n_fov_in_region, self.n_t, n_c, self.n_z, self.height, self.width)
                 chunks = (1, 1, 1, 1, self.height, self.width)
-                arr = store.create_dataset(
-                    "0", shape=shape, chunks=chunks, dtype=np.uint16, overwrite=True
-                )
-                self.zarr_stores[region_idx] = store
+                arr = self._create_tensorstore_array(zarr_path / "0", shape, chunks)
                 self.zarr_arrays[region_idx] = arr
                 _write_zattrs(
                     zarr_path,
@@ -312,7 +328,7 @@ class ZarrAcquisitionSimulator:
                     ],
                     scale=[1, 1, 1, self.z_step_um, self.pixel_size_um, self.pixel_size_um],
                 )
-            print(f"Created 6D zarr stores: {self.n_regions} regions")
+            print(f"Created 6D zarr v3 stores: {self.n_regions} regions")
             for i, (label, n_fov) in enumerate(
                 zip(self.region_labels, self.fovs_per_region)
             ):
@@ -322,13 +338,9 @@ class ZarrAcquisitionSimulator:
             # Single 5D store: (T, C, Z, Y, X)
             zarr_path = self.fov_paths[0]
             zarr_path.mkdir(parents=True, exist_ok=True)
-            store = zarr.open(str(zarr_path), mode="w")
             shape = (self.n_t, n_c, self.n_z, self.height, self.width)
             chunks = (1, 1, 1, self.height, self.width)
-            arr = store.create_dataset(
-                "0", shape=shape, chunks=chunks, dtype=np.uint16, overwrite=True
-            )
-            self.zarr_stores[0] = store
+            arr = self._create_tensorstore_array(zarr_path / "0", shape, chunks)
             self.zarr_arrays[0] = arr
             _write_zattrs(
                 zarr_path,
@@ -337,20 +349,16 @@ class ZarrAcquisitionSimulator:
                 self.pixel_size_um,
                 self.z_step_um,
             )
-            print(f"Created single 5D zarr at {zarr_path}")
+            print(f"Created single 5D zarr v3 at {zarr_path}")
             print(f"  Shape: {shape}")
 
         elif self.structure in ("per_fov", "hcs"):
             # Separate store per FOV: (T, C, Z, Y, X) each
             for fov_idx, zarr_path in enumerate(self.fov_paths):
                 zarr_path.mkdir(parents=True, exist_ok=True)
-                store = zarr.open(str(zarr_path), mode="w")
                 shape = (self.n_t, n_c, self.n_z, self.height, self.width)
                 chunks = (1, 1, 1, self.height, self.width)
-                arr = store.create_dataset(
-                    "0", shape=shape, chunks=chunks, dtype=np.uint16, overwrite=True
-                )
-                self.zarr_stores[fov_idx] = store
+                arr = self._create_tensorstore_array(zarr_path / "0", shape, chunks)
                 self.zarr_arrays[fov_idx] = arr
                 _write_zattrs(
                     zarr_path,
@@ -360,7 +368,7 @@ class ZarrAcquisitionSimulator:
                     self.z_step_um,
                 )
             struct_name = "HCS plate" if self.structure == "hcs" else "per-FOV"
-            print(f"Created {struct_name} zarr stores: {len(self.fov_paths)} FOVs")
+            print(f"Created {struct_name} zarr v3 stores: {len(self.fov_paths)} FOVs")
             for i, p in enumerate(self.fov_paths[:3]):
                 print(f"  [{i}] {p}")
             if len(self.fov_paths) > 3:

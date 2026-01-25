@@ -2138,8 +2138,6 @@ class LightweightViewer(QWidget):
             fov_paths: Optional list of zarr paths, one per FOV (for per_fov/hcs structures).
                        If provided, zarr_path is ignored and each FOV loads from its own store.
         """
-        import zarr
-
         # Stop any running animations and pending loads
         self._stop_play_animation(self._time_play_timer, self._time_play_btn)
         self._stop_play_animation(self._fov_play_timer, self._fov_play_btn)
@@ -2262,8 +2260,6 @@ class LightweightViewer(QWidget):
             width: Image width in pixels
             region_labels: Optional region labels (auto-generated if not provided)
         """
-        import zarr
-
         # Stop any running animations and pending loads
         self._stop_play_animation(self._time_play_timer, self._time_play_btn)
         self._stop_play_animation(self._fov_play_timer, self._fov_play_btn)
