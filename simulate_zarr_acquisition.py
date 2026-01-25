@@ -2,16 +2,15 @@
 Simulate a live acquisition using the push-based zarr API.
 
 This script tests the zarr v3 push-based API with different zarr structures:
-- single: Simple 5D (T, C, Z, Y, X) - single region
+- per_fov: Separate zarr per FOV: zarr/region/fov_N.zarr (5D: T, C, Z, Y, X)
 - 6d: 6D with FOV dimension (FOV, T, C, Z, Y, X), supports multi-region
-- per_fov: Separate zarr per FOV: zarr/region/fov_N.zarr
 - hcs: HCS plate format: plate.zarr/row/col/field/acquisition.zarr
 
 Usage:
-    python simulate_zarr_acquisition.py --structure single
+    python simulate_zarr_acquisition.py --structure per_fov --n-fov 4
+    python simulate_zarr_acquisition.py --structure per_fov --n-fov 1  # Single FOV
     python simulate_zarr_acquisition.py --structure 6d --n-fov 4
     python simulate_zarr_acquisition.py --structure 6d --n-regions 3 --fovs-per-region 4 6 3
-    python simulate_zarr_acquisition.py --structure per_fov --n-fov 4
     python simulate_zarr_acquisition.py --structure hcs --wells A1 A2 B1 B2 --fov-per-well 2
 """
 
@@ -359,24 +358,6 @@ class ZarrAcquisitionSimulator:
             ):
                 print(f"  [{i}] {label}: {n_fov} FOVs at {self.fov_paths[i]}")
 
-        elif self.structure == "single":
-            # Single 5D store: (T, C, Z, Y, X)
-            zarr_path = self.fov_paths[0]
-            zarr_path.mkdir(parents=True, exist_ok=True)
-            shape = (self.n_t, n_c, self.n_z, self.height, self.width)
-            chunks = (1, 1, 1, self.height, self.width)
-            arr = self._create_tensorstore_array(zarr_path / "0", shape, chunks)
-            self.zarr_arrays[0] = arr
-            _write_zarr_metadata(
-                zarr_path,
-                self.channels,
-                self.channel_colors,
-                self.pixel_size_um,
-                self.z_step_um,
-            )
-            print(f"Created single 5D zarr v3 at {zarr_path}")
-            print(f"  Shape: {shape}")
-
         elif self.structure in ("per_fov", "hcs"):
             # Separate store per FOV: (T, C, Z, Y, X) each
             for fov_idx, zarr_path in enumerate(self.fov_paths):
@@ -423,21 +404,10 @@ class ZarrAcquisitionSimulator:
                 width=self.width,
                 region_labels=self.region_labels,
             )
-        elif self.structure in ("per_fov", "hcs"):
-            # Per-FOV mode: pass list of paths
-            self.viewer.start_zarr_acquisition(
-                zarr_path="",  # Not used in per-FOV mode
-                channels=self.channels,
-                num_z=self.n_z,
-                fov_labels=self.fov_labels,
-                height=self.height,
-                width=self.width,
-                fov_paths=[str(p) for p in self.fov_paths],
-            )
         else:
-            # Single store mode (single/6d)
+            # Per-FOV mode (per_fov, hcs): each FOV has its own 5D zarr
             self.viewer.start_zarr_acquisition(
-                zarr_path=str(self.fov_paths[0]),
+                fov_paths=[str(p) for p in self.fov_paths],
                 channels=self.channels,
                 num_z=self.n_z,
                 fov_labels=self.fov_labels,
@@ -498,13 +468,8 @@ class ZarrAcquisitionSimulator:
             print(
                 f"[t={t}] Region {region_idx} FOV {local_fov_idx} ({fov_label}) z={z} ch={ch_name}"
             )
-        elif self.structure == "single":
-            # (T, C, Z, Y, X)
-            self.zarr_arrays[0][t, c, z, :, :] = img
-            self.viewer.notify_zarr_frame(t=t, fov_idx=fov, z=z, channel=ch_name)
-            print(f"[t={t}] FOV {fov} ({fov_label}) z={z} ch={ch_name}")
         else:
-            # per_fov or hcs: each FOV has its own array (T, C, Z, Y, X)
+            # per_fov or hcs: each FOV has its own 5D array (T, C, Z, Y, X)
             self.zarr_arrays[fov][t, c, z, :, :] = img
             self.viewer.notify_zarr_frame(t=t, fov_idx=fov, z=z, channel=ch_name)
             print(f"[t={t}] FOV {fov} ({fov_label}) z={z} ch={ch_name}")
@@ -537,12 +502,11 @@ class ZarrAcquisitionSimulator:
 
     def _mark_acquisition_complete(self):
         """Update zarr.json to mark acquisition as complete."""
-        if self.structure == "single":
-            zarr_dirs = [self.fov_paths[0]]
-        elif self.structure == "6d":
+        if self.structure == "6d":
             # 6d: fov_paths contains region paths
             zarr_dirs = list(self.fov_paths[: self.n_regions])
         else:
+            # per_fov, hcs: each path is a FOV zarr
             zarr_dirs = list(self.fov_paths)
 
         for zarr_dir in zarr_dirs:
@@ -565,17 +529,17 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single 5D zarr (simplest)
-  python simulate_zarr_acquisition.py --structure single
+  # Per-FOV zarr stores (5D: T, C, Z, Y, X per FOV)
+  python simulate_zarr_acquisition.py --structure per_fov --n-fov 4
+
+  # Single FOV (simplest)
+  python simulate_zarr_acquisition.py --structure per_fov --n-fov 1
 
   # 6D zarr with FOV dimension (single region)
   python simulate_zarr_acquisition.py --structure 6d --n-fov 4
 
   # 6D multi-region (variable FOVs per region)
   python simulate_zarr_acquisition.py --structure 6d --n-regions 3 --fovs-per-region 4 6 3
-
-  # Per-FOV zarr stores
-  python simulate_zarr_acquisition.py --structure per_fov --n-fov 4
 
   # HCS plate format
   python simulate_zarr_acquisition.py --structure hcs --wells A1 A2 B1 B2 --fov-per-well 2
@@ -589,9 +553,9 @@ Examples:
     )
     ap.add_argument(
         "--structure",
-        choices=["single", "6d", "per_fov", "hcs"],
-        default="single",
-        help="Zarr structure type (default: single). "
+        choices=["6d", "per_fov", "hcs"],
+        default="per_fov",
+        help="Zarr structure type (default: per_fov). "
         "6d supports multi-region via --n-regions and --fovs-per-region.",
     )
     ap.add_argument(
