@@ -12,7 +12,7 @@ import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
@@ -1416,6 +1416,9 @@ class LightweightViewer(QWidget):
         self._fovs_per_region: List[int] = []  # [4, 6, 3] - variable per region
         self._region_fov_offsets: List[int] = []  # [0, 4, 10] - cumulative offsets
         self._zarr_6d_regions_mode: bool = False
+        self._zarr_written_planes: Set[Tuple] = (
+            set()
+        )  # Track written planes during live acquisition
 
         # Connect signals for thread-safe updates
         self._image_registered.connect(self._on_image_registered)
@@ -2100,6 +2103,7 @@ class LightweightViewer(QWidget):
         # Clear previous state
         self._plane_cache.clear()
         self._max_fov_per_time.clear()
+        self._zarr_written_planes.clear()
 
         # Store configuration
         self._channel_names = list(channels)
@@ -2218,6 +2222,7 @@ class LightweightViewer(QWidget):
         # Clear previous state
         self._plane_cache.clear()
         self._max_fov_per_time.clear()
+        self._zarr_written_planes.clear()
 
         # Validate inputs
         if not region_paths:
@@ -2365,6 +2370,10 @@ class LightweightViewer(QWidget):
                     f"Invalid region_idx {region_idx} (max: {len(self._region_fov_offsets) - 1})"
                 )
 
+        # Track this plane as written (for cache eligibility)
+        cache_key = ("zarr", t, global_fov_idx, z, channel_idx)
+        self._zarr_written_planes.add(cache_key)
+
         # Emit signal for main thread handling
         try:
             self._zarr_frame_registered.emit(t, global_fov_idx, z, channel_idx)
@@ -2510,9 +2519,12 @@ class LightweightViewer(QWidget):
                 # Index 6D: (FOV, T, C, Z, Y, X) → arr[fov, t, c, z, :, :]
                 plane = arr[local_fov_idx, t, channel_idx, z, :, :]
                 plane = np.asarray(plane)
-                # Only cache if plane has data (non-zero max indicates written data)
-                # This prevents caching empty planes during live acquisition
-                if plane.max() > 0:
+                # Cache if not in live acquisition, or if plane was explicitly written
+                # This prevents caching unwritten (zero) planes during live acquisition
+                if (
+                    not self._zarr_acquisition_active
+                    or cache_key in self._zarr_written_planes
+                ):
                     self._plane_cache.put(cache_key, plane)
                 return plane
             except (IndexError, KeyError) as e:
@@ -2610,9 +2622,12 @@ class LightweightViewer(QWidget):
                 )
 
             plane = np.asarray(plane)
-            # Only cache if plane has data (non-zero max indicates written data)
-            # This prevents caching empty planes during live acquisition
-            if plane.max() > 0:
+            # Cache if not in live acquisition, or if plane was explicitly written
+            # This prevents caching unwritten (zero) planes during live acquisition
+            if (
+                not self._zarr_acquisition_active
+                or cache_key in self._zarr_written_planes
+            ):
                 self._plane_cache.put(cache_key, plane)
             return plane
 

@@ -355,30 +355,35 @@ class TestMultiRegion6D:
 class TestCachingBehavior:
     """Test plane caching behavior during live acquisition."""
 
-    def test_empty_plane_not_cached(self):
-        """Test that empty (all-zero) planes are not cached.
+    def test_written_plane_tracking(self):
+        """Test that only written planes are cached during live acquisition.
 
-        This prevents stale zeros from being cached when viewing an FOV
-        before its data has been written during live acquisition.
+        Uses a set to track which planes have been written via notify_zarr_frame().
+        This is O(1) lookup vs O(n) plane.max() check, and handles legitimately
+        black images correctly.
         """
-        import numpy as np
+        # Simulate the written planes tracking
+        written_planes = set()
+        acquisition_active = True
 
-        # Simulate cache behavior: only cache if plane has data
-        cache = {}
+        def should_cache(cache_key):
+            """Replicate the caching logic: cache if not live or if written."""
+            if not acquisition_active:
+                return True  # Browsing existing data - cache everything
+            return cache_key in written_planes
 
-        def should_cache(plane):
-            """Replicate the caching logic: only cache non-empty planes."""
-            return plane.max() > 0
+        # During live acquisition, unwritten plane should not be cached
+        key1 = ("zarr", 0, 4, 0, 1)  # t=0, fov=4, z=0, ch=1
+        assert not should_cache(key1)
 
-        # Empty plane should not be cached
-        empty_plane = np.zeros((100, 100), dtype=np.uint16)
-        assert not should_cache(empty_plane)
+        # After notify_zarr_frame(), plane should be cached
+        written_planes.add(key1)
+        assert should_cache(key1)
 
-        # Plane with data should be cached
-        data_plane = np.random.randint(100, 60000, size=(100, 100), dtype=np.uint16)
-        assert should_cache(data_plane)
+        # Different plane still not cached until written
+        key2 = ("zarr", 0, 5, 0, 1)
+        assert not should_cache(key2)
 
-        # Edge case: plane with single non-zero pixel should be cached
-        almost_empty = np.zeros((100, 100), dtype=np.uint16)
-        almost_empty[50, 50] = 1
-        assert should_cache(almost_empty)
+        # When acquisition ends, all planes cached (browsing mode)
+        acquisition_active = False
+        assert should_cache(key2)  # Now cacheable even though not in written set
