@@ -450,7 +450,6 @@ class ZarrAcquisitionSimulator:
 
     def _mark_acquisition_complete(self):
         """Update .zattrs files to mark acquisition as complete."""
-        paths_to_update = []
         if self.structure in ("single", "6d"):
             paths_to_update = [self.fov_paths[0] / ".zattrs"]
         else:
