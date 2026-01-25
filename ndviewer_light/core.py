@@ -1480,6 +1480,9 @@ class LightweightViewer(QWidget):
         self._zarr_written_planes_lock = (
             threading.Lock()
         )  # Protects _zarr_written_planes
+        self._zarr_stores_lock = (
+            threading.Lock()
+        )  # Protects _zarr_fov_stores and _zarr_region_stores
 
         # Connect signals for thread-safe updates
         self._image_registered.connect(self._on_image_registered)
@@ -2150,10 +2153,11 @@ class LightweightViewer(QWidget):
         self._zarr_load_pending = False
 
         # Close any existing zarr stores
-        self._zarr_acquisition_store = None
-        self._zarr_fov_stores.clear()
-        # Also clear 6D regions state (in case switching modes)
-        self._zarr_region_stores.clear()
+        with self._zarr_stores_lock:
+            self._zarr_acquisition_store = None
+            self._zarr_fov_stores.clear()
+            # Also clear 6D regions state (in case switching modes)
+            self._zarr_region_stores.clear()
         self._zarr_region_paths = []
         self._fovs_per_region = []
         self._region_fov_offsets = []
@@ -2267,9 +2271,10 @@ class LightweightViewer(QWidget):
         self._zarr_load_pending = False
 
         # Close any existing zarr stores
-        self._zarr_acquisition_store = None
-        self._zarr_fov_stores.clear()
-        self._zarr_region_stores.clear()
+        with self._zarr_stores_lock:
+            self._zarr_acquisition_store = None
+            self._zarr_fov_stores.clear()
+            self._zarr_region_stores.clear()
 
         # Clear previous state
         self._plane_cache.clear()
@@ -2546,21 +2551,23 @@ class LightweightViewer(QWidget):
                     (self._image_height, self._image_width), dtype=np.uint16
                 )
 
-            # Get or open the store for this region (lazy loading)
-            if region_idx not in self._zarr_region_stores:
-                region_path = self._zarr_region_paths[region_idx]
-                logger.debug(
-                    f"Opening zarr store for region {region_idx}: {region_path}"
-                )
-                ts_arr = open_zarr_tensorstore(region_path, array_path="0")
-                if ts_arr is None:
-                    logger.debug(f"Zarr store not accessible for region {region_idx}")
-                    return np.zeros(
-                        (self._image_height, self._image_width), dtype=np.uint16
+            # Get or open the store for this region (lazy loading, thread-safe)
+            with self._zarr_stores_lock:
+                if region_idx not in self._zarr_region_stores:
+                    region_path = self._zarr_region_paths[region_idx]
+                    logger.debug(
+                        f"Opening zarr store for region {region_idx}: {region_path}"
                     )
-                self._zarr_region_stores[region_idx] = ts_arr
-
-            arr = self._zarr_region_stores[region_idx]
+                    ts_arr = open_zarr_tensorstore(region_path, array_path="0")
+                    if ts_arr is None:
+                        logger.debug(
+                            f"Zarr store not accessible for region {region_idx}"
+                        )
+                        return np.zeros(
+                            (self._image_height, self._image_width), dtype=np.uint16
+                        )
+                    self._zarr_region_stores[region_idx] = ts_arr
+                arr = self._zarr_region_stores[region_idx]
 
             # Read from 6D array: (FOV, T, C, Z, Y, X)
             try:
@@ -2599,33 +2606,33 @@ class LightweightViewer(QWidget):
                     (self._image_height, self._image_width), dtype=np.uint16
                 )
 
-            # Get or open the store for this FOV
-            if fov_idx not in self._zarr_fov_stores:
-                fov_path = self._zarr_fov_paths[fov_idx]
-                ts_arr = open_zarr_tensorstore(fov_path, array_path="0")
-                if ts_arr is None:
-                    logger.debug(f"Zarr store not accessible for FOV {fov_idx}")
-                    return np.zeros(
-                        (self._image_height, self._image_width), dtype=np.uint16
-                    )
-                self._zarr_fov_stores[fov_idx] = ts_arr
-
-            arr = self._zarr_fov_stores[fov_idx]
+            # Get or open the store for this FOV (thread-safe)
+            with self._zarr_stores_lock:
+                if fov_idx not in self._zarr_fov_stores:
+                    fov_path = self._zarr_fov_paths[fov_idx]
+                    ts_arr = open_zarr_tensorstore(fov_path, array_path="0")
+                    if ts_arr is None:
+                        logger.debug(f"Zarr store not accessible for FOV {fov_idx}")
+                        return np.zeros(
+                            (self._image_height, self._image_width), dtype=np.uint16
+                        )
+                    self._zarr_fov_stores[fov_idx] = ts_arr
+                arr = self._zarr_fov_stores[fov_idx]
 
         else:
-            # Single-store mode (single/6d structures)
-            if self._zarr_acquisition_store is None and self._zarr_acquisition_path:
-                ts_arr = open_zarr_tensorstore(
-                    self._zarr_acquisition_path, array_path="0"
-                )
-                if ts_arr is None:
-                    logger.debug("Zarr store not accessible")
-                    return np.zeros(
-                        (self._image_height, self._image_width), dtype=np.uint16
+            # Single-store mode (single/6d structures, thread-safe)
+            with self._zarr_stores_lock:
+                if self._zarr_acquisition_store is None and self._zarr_acquisition_path:
+                    ts_arr = open_zarr_tensorstore(
+                        self._zarr_acquisition_path, array_path="0"
                     )
-                self._zarr_acquisition_store = ts_arr
-
-            arr = self._zarr_acquisition_store
+                    if ts_arr is None:
+                        logger.debug("Zarr store not accessible")
+                        return np.zeros(
+                            (self._image_height, self._image_width), dtype=np.uint16
+                        )
+                    self._zarr_acquisition_store = ts_arr
+                arr = self._zarr_acquisition_store
 
         if arr is None:
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
@@ -2773,12 +2780,14 @@ class LightweightViewer(QWidget):
         if self._zarr_debounce_timer:
             self._zarr_debounce_timer.stop()
         # Clean up zarr state
-        self._zarr_acquisition_store = None
+        self._zarr_acquisition_active = False
+        with self._zarr_stores_lock:
+            self._zarr_acquisition_store = None
+            self._zarr_fov_stores.clear()
+            self._zarr_region_stores.clear()
         self._zarr_acquisition_path = None
-        self._zarr_fov_stores.clear()
         self._zarr_fov_paths = []
         # Clean up 6d_regions state
-        self._zarr_region_stores.clear()
         self._zarr_region_paths = []
         self._fovs_per_region = []
         self._region_fov_offsets = []
