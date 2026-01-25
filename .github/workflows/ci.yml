@@ -41,6 +41,7 @@ jobs:
         run: |
           conda activate ndviewer_light
           pip install pytest
+          pip install -e .
 
       - name: Install system dependencies for Qt
         run: |
