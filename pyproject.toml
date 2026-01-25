@@ -24,3 +24,6 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ndviewer_light"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
