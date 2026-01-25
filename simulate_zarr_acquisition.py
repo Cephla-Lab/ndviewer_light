@@ -93,7 +93,7 @@ def _draw_text(
         cursor_x += char_w + spacing
 
 
-def _write_zattrs(
+def _write_zarr_metadata(
     zarr_path: Path,
     channels: list[str],
     channel_colors: list[str],
@@ -103,7 +103,11 @@ def _write_zattrs(
     axes: Optional[list[dict]] = None,
     scale: Optional[list[float]] = None,
 ) -> None:
-    """Write OME-NGFF .zattrs metadata file."""
+    """Write OME-NGFF metadata to zarr.json attributes (zarr v3 format).
+
+    Matches Squid's new zarr v3 format where metadata is stored in
+    zarr.json -> attributes -> ome.multiscales/omero and _squid.
+    """
     if axes is None:
         axes = [
             {"name": "t", "type": "time"},
@@ -115,37 +119,48 @@ def _write_zattrs(
     if scale is None:
         scale = [1, 1, z_step_um, pixel_size_um, pixel_size_um]
 
-    zattrs = {
-        "multiscales": [
-            {
-                "version": "0.4",
-                "axes": axes,
-                "datasets": [
-                    {
-                        "path": "0",
-                        "coordinateTransformations": [
-                            {"type": "scale", "scale": scale}
-                        ],
-                    }
-                ],
-            }
-        ],
-        "omero": {
-            "channels": [
-                {"label": name, "color": color}
-                for name, color in zip(channels, channel_colors)
-            ]
+    # Build OME-NGFF metadata in Squid's new format
+    attributes = {
+        "ome": {
+            "multiscales": [
+                {
+                    "version": "0.4",
+                    "axes": axes,
+                    "datasets": [
+                        {
+                            "path": "0",
+                            "coordinateTransformations": [
+                                {"type": "scale", "scale": scale}
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "omero": {
+                "channels": [
+                    {"label": name, "color": color}
+                    for name, color in zip(channels, channel_colors)
+                ]
+            },
         },
-        "_squid_metadata": {
+        "_squid": {
             "pixel_size_um": pixel_size_um,
             "z_step_um": z_step_um,
             "acquisition_complete": acquisition_complete,
         },
     }
 
-    zattrs_path = zarr_path / ".zattrs"
-    with open(zattrs_path, "w") as f:
-        json.dump(zattrs, f, indent=2)
+    # Read existing zarr.json (created by tensorstore) and add attributes
+    zarr_json_path = zarr_path / "zarr.json"
+    zarr_json = {}
+    if zarr_json_path.exists():
+        with open(zarr_json_path, "r") as f:
+            zarr_json = json.load(f)
+
+    zarr_json["attributes"] = attributes
+
+    with open(zarr_json_path, "w") as f:
+        json.dump(zarr_json, f, indent=2)
 
 
 class ZarrAcquisitionSimulator:
@@ -312,7 +327,7 @@ class ZarrAcquisitionSimulator:
                 chunks = (1, 1, 1, 1, self.height, self.width)
                 arr = self._create_tensorstore_array(zarr_path / "0", shape, chunks)
                 self.zarr_arrays[region_idx] = arr
-                _write_zattrs(
+                _write_zarr_metadata(
                     zarr_path,
                     self.channels,
                     self.channel_colors,
@@ -342,7 +357,7 @@ class ZarrAcquisitionSimulator:
             chunks = (1, 1, 1, self.height, self.width)
             arr = self._create_tensorstore_array(zarr_path / "0", shape, chunks)
             self.zarr_arrays[0] = arr
-            _write_zattrs(
+            _write_zarr_metadata(
                 zarr_path,
                 self.channels,
                 self.channel_colors,
@@ -360,7 +375,7 @@ class ZarrAcquisitionSimulator:
                 chunks = (1, 1, 1, self.height, self.width)
                 arr = self._create_tensorstore_array(zarr_path / "0", shape, chunks)
                 self.zarr_arrays[fov_idx] = arr
-                _write_zattrs(
+                _write_zarr_metadata(
                     zarr_path,
                     self.channels,
                     self.channel_colors,
