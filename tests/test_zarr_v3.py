@@ -416,15 +416,30 @@ class TestNewSquidFormat:
                                 "axes": [
                                     {"name": "t", "type": "time"},
                                     {"name": "c", "type": "channel"},
-                                    {"name": "z", "type": "space", "unit": "micrometer"},
-                                    {"name": "y", "type": "space", "unit": "micrometer"},
-                                    {"name": "x", "type": "space", "unit": "micrometer"},
+                                    {
+                                        "name": "z",
+                                        "type": "space",
+                                        "unit": "micrometer",
+                                    },
+                                    {
+                                        "name": "y",
+                                        "type": "space",
+                                        "unit": "micrometer",
+                                    },
+                                    {
+                                        "name": "x",
+                                        "type": "space",
+                                        "unit": "micrometer",
+                                    },
                                 ],
                                 "datasets": [
                                     {
                                         "path": "0",
                                         "coordinateTransformations": [
-                                            {"type": "scale", "scale": [1, 1, 2.0, 0.325, 0.325]}
+                                            {
+                                                "type": "scale",
+                                                "scale": [1, 1, 2.0, 0.325, 0.325],
+                                            }
                                         ],
                                     }
                                 ],

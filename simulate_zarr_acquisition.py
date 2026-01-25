@@ -418,9 +418,7 @@ class ZarrAcquisitionSimulator:
             channel=ch_name,
         )
 
-        print(
-            f"[t={t}] FOV {fov} ({fov_label}) z={z} ch={ch_name}"
-        )
+        print(f"[t={t}] FOV {fov} ({fov_label}) z={z} ch={ch_name}")
 
         # Advance to next plane: cycle through channels, then z, then FOV, then time
         self.current_c += 1

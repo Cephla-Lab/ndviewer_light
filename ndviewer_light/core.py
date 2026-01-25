@@ -842,7 +842,9 @@ def detect_format(base_path: Path) -> str:
                     return "zarr_v3"
                 # Check for .zarr or .ome.zarr subdirectories
                 for d in region_dir.iterdir():
-                    if d.is_dir() and (d.suffix == ".zarr" or d.name.endswith(".ome.zarr")):
+                    if d.is_dir() and (
+                        d.suffix == ".zarr" or d.name.endswith(".ome.zarr")
+                    ):
                         return "zarr_v3"
 
     # 3. Direct .zarr or .ome.zarr directory
