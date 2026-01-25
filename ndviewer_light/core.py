@@ -2334,15 +2334,14 @@ class LightweightViewer(QWidget):
         self._max_time_idx = 0
         self._zarr_acquisition_active = True
 
-        # Update sliders
-        total_fovs = sum(fovs_per_region)
+        # Update sliders - start at 0, grows as FOVs are acquired
         self._updating_sliders = True
         try:
             self._time_slider.setMaximum(0)
             self._time_slider.setValue(0)
             self._time_label.setText("T: 0")
 
-            self._fov_slider.setMaximum(max(0, total_fovs - 1))
+            self._fov_slider.setMaximum(0)  # Start at 0, grows as FOVs are acquired
             self._fov_slider.setValue(0)
             if self._fov_labels:
                 self._fov_label.setText(f"FOV: {self._fov_labels[0]}")
