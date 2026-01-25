@@ -825,7 +825,7 @@ def detect_format(base_path: Path) -> str:
     Zarr v3 is detected by:
     - plate.zarr or plate.ome.zarr directory (HCS format)
     - zarr/ directory with .zarr or .ome.zarr subdirectories
-    - base_path itself being a .zarr/.ome.zarr directory with zarr.json or .zattrs
+    - base_path itself being a .zarr/.ome.zarr directory with zarr.json
 
     OME-TIFF is detected by .ome.tif* files.
     Falls back to single_tiff if neither is detected.
@@ -852,7 +852,7 @@ def detect_format(base_path: Path) -> str:
 
     # 3. Direct .zarr or .ome.zarr directory
     if base_path.suffix == ".zarr" or base_path.name.endswith(".ome.zarr"):
-        if (base_path / "zarr.json").exists() or (base_path / ".zattrs").exists():
+        if (base_path / "zarr.json").exists():
             return "zarr_v3"
 
     # Check for OME-TIFF
@@ -992,15 +992,13 @@ def hex_to_colormap(hex_color: str) -> str:
 def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
     """Parse OME-NGFF metadata from zarr v3 store.
 
-    Supports both old and new Squid zarr formats:
-    - Old format: .zattrs file with multiscales/omero/_squid_metadata at root
-    - New format (PR #474): zarr.json with attributes.ome.multiscales/omero and attributes._squid
+    Reads metadata from zarr.json -> attributes with ome.multiscales/omero and _squid.
 
-    Extracts metadata from zarr v3 stores created by Squid:
+    Extracts metadata from zarr v3 stores:
     - multiscales[0].axes: axis order and names
     - multiscales[0].coordinateTransformations: physical pixel sizes
     - omero.channels: channel names and hex colors
-    - _squid/_squid_metadata: Squid-specific metadata (physical sizes, acquisition_complete)
+    - _squid: Squid-specific metadata (physical sizes, acquisition_complete)
 
     Args:
         zarr_path: Path to a .zarr directory
@@ -1023,31 +1021,23 @@ def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
         "acquisition_complete": False,
     }
 
-    # Try to read metadata from zarr.json first (new format), then .zattrs (old format)
+    # Read metadata from zarr.json
     attrs = None
     zarr_json_path = zarr_path / "zarr.json"
-    zattrs_path = zarr_path / ".zattrs"
 
     if zarr_json_path.exists():
         try:
             with open(zarr_json_path, "r") as f:
                 zarr_json = json.load(f)
-            # New format: metadata is in zarr.json -> attributes
+            # Metadata is in zarr.json -> attributes
             attrs = zarr_json.get("attributes", {})
         except Exception as e:
             logger.debug("Failed to read zarr.json: %s", e)
 
-    if not attrs and zattrs_path.exists():
-        try:
-            with open(zattrs_path, "r") as f:
-                attrs = json.load(f)
-        except Exception as e:
-            logger.debug("Failed to read .zattrs: %s", e)
-
     if not attrs:
-        if zarr_json_path.exists() or zattrs_path.exists():
+        if zarr_json_path.exists():
             logger.warning(
-                "Metadata files exist but could not be parsed for %s, using defaults",
+                "zarr.json exists but could not be parsed for %s, using defaults",
                 zarr_path,
             )
         return result
@@ -1229,8 +1219,7 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
     # Check if base_path itself is a .zarr or .ome.zarr directory
     if base_path.suffix == ".zarr" or base_path.name.endswith(".ome.zarr"):
         zarr_json = base_path / "zarr.json"
-        zattrs = base_path / ".zattrs"
-        if zarr_json.exists() or zattrs.exists():
+        if zarr_json.exists():
             fovs.append({"region": "default", "fov": 0, "path": base_path})
             return fovs, "6d_single"
 
@@ -2804,21 +2793,14 @@ class LightweightViewer(QWidget):
 
             # Get first zarr path to check metadata
             first_path = fovs[0]["path"]
-            # Check both zarr.json (new format) and .zattrs (old format)
             zarr_json_path = first_path / "zarr.json"
-            zattrs_path = first_path / ".zattrs"
 
             mtime_ns = 0
             acquisition_complete = False
-            metadata_path = None
-            if zarr_json_path.exists():
-                metadata_path = zarr_json_path
-            elif zattrs_path.exists():
-                metadata_path = zattrs_path
 
-            if metadata_path:
+            if zarr_json_path.exists():
                 try:
-                    st = metadata_path.stat()
+                    st = zarr_json_path.stat()
                     mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
                     meta = parse_zarr_v3_metadata(first_path)
                     acquisition_complete = meta.get("acquisition_complete", False)

@@ -2,7 +2,7 @@
 
 Tests verify:
 - Format detection for zarr v3 datasets
-- Metadata parsing from .zattrs files
+- Metadata parsing from zarr.json files
 - FOV discovery for HCS and non-HCS structures
 - Hex color to colormap conversion
 """
@@ -21,6 +21,17 @@ from ndviewer_light import (
 )
 
 
+def _write_zarr_json(path: Path, attrs: dict = None) -> None:
+    """Helper to write a valid zarr.json with optional attributes."""
+    zarr_json = {
+        "zarr_format": 3,
+        "node_type": "group",
+    }
+    if attrs:
+        zarr_json["attributes"] = attrs
+    (path / "zarr.json").write_text(json.dumps(zarr_json))
+
+
 class TestDetectZarrV3Format:
     """Test suite for zarr v3 format detection."""
 
@@ -31,7 +42,7 @@ class TestDetectZarrV3Format:
             # Create plate.zarr directory
             plate_zarr = base / "plate.zarr"
             plate_zarr.mkdir()
-            (plate_zarr / ".zattrs").write_text("{}")
+            _write_zarr_json(plate_zarr)
 
             assert detect_format(base) == "zarr_v3"
 
@@ -44,7 +55,7 @@ class TestDetectZarrV3Format:
             zarr_dir.mkdir(parents=True)
             acq_zarr = zarr_dir / "acquisition.zarr"
             acq_zarr.mkdir()
-            (acq_zarr / ".zattrs").write_text("{}")
+            _write_zarr_json(acq_zarr)
 
             assert detect_format(base) == "zarr_v3"
 
@@ -57,7 +68,7 @@ class TestDetectZarrV3Format:
             zarr_dir.mkdir(parents=True)
             fov_zarr = zarr_dir / "fov_0.zarr"
             fov_zarr.mkdir()
-            (fov_zarr / ".zattrs").write_text("{}")
+            _write_zarr_json(fov_zarr)
 
             assert detect_format(base) == "zarr_v3"
 
@@ -66,7 +77,7 @@ class TestDetectZarrV3Format:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir) / "dataset.zarr"
             base.mkdir()
-            (base / ".zattrs").write_text("{}")
+            _write_zarr_json(base)
 
             assert detect_format(base) == "zarr_v3"
 
@@ -107,31 +118,33 @@ class TestParseZarrV3Metadata:
         """Test parsing OME-NGFF multiscales metadata."""
         with tempfile.TemporaryDirectory() as tmpdir:
             zarr_path = Path(tmpdir)
-            zattrs = {
-                "multiscales": [
-                    {
-                        "axes": [
-                            {"name": "t", "type": "time"},
-                            {"name": "c", "type": "channel"},
-                            {"name": "z", "type": "space", "unit": "micrometer"},
-                            {"name": "y", "type": "space", "unit": "micrometer"},
-                            {"name": "x", "type": "space", "unit": "micrometer"},
-                        ],
-                        "datasets": [
-                            {
-                                "path": "0",
-                                "coordinateTransformations": [
-                                    {
-                                        "type": "scale",
-                                        "scale": [1, 1, 2.0, 0.325, 0.325],
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ]
+            attrs = {
+                "ome": {
+                    "multiscales": [
+                        {
+                            "axes": [
+                                {"name": "t", "type": "time"},
+                                {"name": "c", "type": "channel"},
+                                {"name": "z", "type": "space", "unit": "micrometer"},
+                                {"name": "y", "type": "space", "unit": "micrometer"},
+                                {"name": "x", "type": "space", "unit": "micrometer"},
+                            ],
+                            "datasets": [
+                                {
+                                    "path": "0",
+                                    "coordinateTransformations": [
+                                        {
+                                            "type": "scale",
+                                            "scale": [1, 1, 2.0, 0.325, 0.325],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
             }
-            (zarr_path / ".zattrs").write_text(json.dumps(zattrs))
+            _write_zarr_json(zarr_path, attrs)
 
             meta = parse_zarr_v3_metadata(zarr_path)
 
@@ -143,16 +156,18 @@ class TestParseZarrV3Metadata:
         """Test parsing omero.channels metadata."""
         with tempfile.TemporaryDirectory() as tmpdir:
             zarr_path = Path(tmpdir)
-            zattrs = {
-                "omero": {
-                    "channels": [
-                        {"label": "DAPI", "color": "0000FF"},
-                        {"label": "GFP", "color": "00FF00"},
-                        {"label": "RFP", "color": "FF0000"},
-                    ]
+            attrs = {
+                "ome": {
+                    "omero": {
+                        "channels": [
+                            {"label": "DAPI", "color": "0000FF"},
+                            {"label": "GFP", "color": "00FF00"},
+                            {"label": "RFP", "color": "FF0000"},
+                        ]
+                    }
                 }
             }
-            (zarr_path / ".zattrs").write_text(json.dumps(zattrs))
+            _write_zarr_json(zarr_path, attrs)
 
             meta = parse_zarr_v3_metadata(zarr_path)
 
@@ -160,17 +175,17 @@ class TestParseZarrV3Metadata:
             assert meta["channel_colors"] == ["0000FF", "00FF00", "FF0000"]
 
     def test_parse_squid_metadata(self):
-        """Test parsing _squid_metadata fields."""
+        """Test parsing _squid metadata fields."""
         with tempfile.TemporaryDirectory() as tmpdir:
             zarr_path = Path(tmpdir)
-            zattrs = {
-                "_squid_metadata": {
+            attrs = {
+                "_squid": {
                     "pixel_size_um": 0.5,
                     "z_step_um": 1.5,
                     "acquisition_complete": True,
                 }
             }
-            (zarr_path / ".zattrs").write_text(json.dumps(zattrs))
+            _write_zarr_json(zarr_path, attrs)
 
             meta = parse_zarr_v3_metadata(zarr_path)
 
@@ -179,37 +194,39 @@ class TestParseZarrV3Metadata:
             assert meta["acquisition_complete"] is True
 
     def test_squid_metadata_overrides_multiscales(self):
-        """Test that _squid_metadata overrides multiscales values."""
+        """Test that _squid metadata overrides multiscales values."""
         with tempfile.TemporaryDirectory() as tmpdir:
             zarr_path = Path(tmpdir)
-            zattrs = {
-                "multiscales": [
-                    {
-                        "axes": [
-                            {"name": "z", "type": "space", "unit": "micrometer"},
-                            {"name": "y", "type": "space", "unit": "micrometer"},
-                            {"name": "x", "type": "space", "unit": "micrometer"},
-                        ],
-                        "coordinateTransformations": [
-                            {"type": "scale", "scale": [1.0, 0.325, 0.325]}
-                        ],
-                    }
-                ],
-                "_squid_metadata": {
+            attrs = {
+                "ome": {
+                    "multiscales": [
+                        {
+                            "axes": [
+                                {"name": "z", "type": "space", "unit": "micrometer"},
+                                {"name": "y", "type": "space", "unit": "micrometer"},
+                                {"name": "x", "type": "space", "unit": "micrometer"},
+                            ],
+                            "coordinateTransformations": [
+                                {"type": "scale", "scale": [1.0, 0.325, 0.325]}
+                            ],
+                        }
+                    ]
+                },
+                "_squid": {
                     "pixel_size_um": 0.5,
                     "z_step_um": 2.0,
                 },
             }
-            (zarr_path / ".zattrs").write_text(json.dumps(zattrs))
+            _write_zarr_json(zarr_path, attrs)
 
             meta = parse_zarr_v3_metadata(zarr_path)
 
-            # Should use _squid_metadata values
+            # Should use _squid values
             assert meta["pixel_size_um"] == pytest.approx(0.5)
             assert meta["dz_um"] == pytest.approx(2.0)
 
-    def test_parse_missing_zattrs(self):
-        """Test handling of missing .zattrs file."""
+    def test_parse_missing_zarr_json(self):
+        """Test handling of missing zarr.json file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             zarr_path = Path(tmpdir)
 
@@ -222,10 +239,10 @@ class TestParseZarrV3Metadata:
             assert meta["acquisition_complete"] is False
 
     def test_parse_invalid_json(self):
-        """Test handling of invalid JSON in .zattrs."""
+        """Test handling of invalid JSON in zarr.json."""
         with tempfile.TemporaryDirectory() as tmpdir:
             zarr_path = Path(tmpdir)
-            (zarr_path / ".zattrs").write_text("not valid json {")
+            (zarr_path / "zarr.json").write_text("not valid json {")
 
             meta = parse_zarr_v3_metadata(zarr_path)
 
@@ -248,7 +265,7 @@ class TestDiscoverZarrV3Fovs:
                             base / "plate.zarr" / row / col / field / "acquisition.zarr"
                         )
                         acq_path.mkdir(parents=True)
-                        (acq_path / ".zattrs").write_text("{}")
+                        _write_zarr_json(acq_path)
 
             fovs, structure_type = discover_zarr_v3_fovs(base)
 
@@ -269,7 +286,7 @@ class TestDiscoverZarrV3Fovs:
             for fov_idx in range(3):
                 fov_zarr = region_dir / f"fov_{fov_idx}.zarr"
                 fov_zarr.mkdir()
-                (fov_zarr / ".zattrs").write_text("{}")
+                _write_zarr_json(fov_zarr)
 
             fovs, structure_type = discover_zarr_v3_fovs(base)
 
@@ -285,7 +302,7 @@ class TestDiscoverZarrV3Fovs:
             # Create zarr/region_1/acquisition.zarr
             acq_path = base / "zarr" / "region_1" / "acquisition.zarr"
             acq_path.mkdir(parents=True)
-            (acq_path / ".zattrs").write_text("{}")
+            _write_zarr_json(acq_path)
 
             fovs, structure_type = discover_zarr_v3_fovs(base)
 
@@ -298,7 +315,7 @@ class TestDiscoverZarrV3Fovs:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir) / "dataset.zarr"
             base.mkdir()
-            (base / ".zattrs").write_text("{}")
+            _write_zarr_json(base)
 
             fovs, structure_type = discover_zarr_v3_fovs(base)
 
@@ -408,7 +425,7 @@ class TestNewSquidFormat:
             zarr_path = Path(tmpdir)
             zarr_json = {
                 "zarr_format": 3,
-                "node_type": "array",
+                "node_type": "group",
                 "attributes": {
                     "ome": {
                         "multiscales": [
@@ -508,19 +525,16 @@ class TestNewSquidFormat:
             assert fovs[0]["region"] == "region_1"
             assert fovs[0]["fov"] == 0
 
-    def test_metadata_fallback_to_zattrs(self):
-        """Test that metadata parsing falls back to .zattrs if zarr.json has no attributes."""
+    def test_zarr_json_without_attributes(self):
+        """Test that zarr.json without attributes returns default metadata."""
         with tempfile.TemporaryDirectory() as tmpdir:
             zarr_path = Path(tmpdir)
             # zarr.json without attributes
             (zarr_path / "zarr.json").write_text('{"zarr_format": 3}')
-            # .zattrs with metadata (old format)
-            zattrs = {
-                "multiscales": [{"axes": [{"name": "x", "type": "space"}]}],
-                "_squid_metadata": {"pixel_size_um": 0.325},
-            }
-            (zarr_path / ".zattrs").write_text(json.dumps(zattrs))
 
             meta = parse_zarr_v3_metadata(zarr_path)
 
-            assert meta["pixel_size_um"] == pytest.approx(0.325)
+            # Should return defaults when no attributes present
+            assert meta["axes"] == []
+            assert meta["pixel_size_um"] is None
+            assert meta["channel_names"] == []

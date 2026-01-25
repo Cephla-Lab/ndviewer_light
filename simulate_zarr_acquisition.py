@@ -103,11 +103,9 @@ def _write_zarr_metadata(
     axes: Optional[list[dict]] = None,
     scale: Optional[list[float]] = None,
 ) -> None:
-    """Write OME-NGFF metadata to both zarr.json and .zattrs for compatibility.
+    """Write OME-NGFF metadata to zarr.json (zarr v3 format).
 
-    Writes to:
-    - zarr.json -> attributes (new Squid v3 format with ome.multiscales/omero)
-    - .zattrs (legacy format for backward compatibility)
+    Writes metadata to zarr.json -> attributes with ome.multiscales/omero and _squid.
     """
     if axes is None:
         axes = [
@@ -120,7 +118,7 @@ def _write_zarr_metadata(
     if scale is None:
         scale = [1, 1, z_step_um, pixel_size_um, pixel_size_um]
 
-    # Build OME-NGFF metadata in Squid's new format
+    # Build OME-NGFF metadata
     attributes = {
         "ome": {
             "multiscales": [
@@ -151,7 +149,7 @@ def _write_zarr_metadata(
         },
     }
 
-    # Write to zarr.json (new format) with proper zarr v3 group structure
+    # Write to zarr.json with proper zarr v3 group structure
     zarr_json_path = zarr_path / "zarr.json"
     zarr_json = {
         "zarr_format": 3,
@@ -160,21 +158,6 @@ def _write_zarr_metadata(
     }
     with open(zarr_json_path, "w") as f:
         json.dump(zarr_json, f, indent=2)
-
-    # Also write to .zattrs (legacy format) for backward compatibility
-    # Uses the old format with multiscales/omero at root level
-    zattrs = {
-        "multiscales": attributes["ome"]["multiscales"],
-        "omero": attributes["ome"]["omero"],
-        "_squid_metadata": {
-            "pixel_size_um": pixel_size_um,
-            "z_step_um": z_step_um,
-            "acquisition_complete": acquisition_complete,
-        },
-    }
-    zattrs_path = zarr_path / ".zattrs"
-    with open(zattrs_path, "w") as f:
-        json.dump(zattrs, f, indent=2)
 
 
 class ZarrAcquisitionSimulator:
@@ -540,7 +523,7 @@ class ZarrAcquisitionSimulator:
         print("Acquisition complete. Browse the dataset in the viewer.")
 
     def _mark_acquisition_complete(self):
-        """Update zarr.json and .zattrs files to mark acquisition as complete."""
+        """Update zarr.json to mark acquisition as complete."""
         if self.structure == "single":
             zarr_dirs = [self.fov_paths[0]]
         elif self.structure == "6d":
@@ -550,7 +533,6 @@ class ZarrAcquisitionSimulator:
             zarr_dirs = list(self.fov_paths)
 
         for zarr_dir in zarr_dirs:
-            # Update zarr.json (new format)
             zarr_json_path = zarr_dir / "zarr.json"
             if zarr_json_path.exists():
                 with open(zarr_json_path, "r") as f:
@@ -562,17 +544,6 @@ class ZarrAcquisitionSimulator:
                 zarr_json["attributes"] = attrs
                 with open(zarr_json_path, "w") as f:
                     json.dump(zarr_json, f, indent=2)
-
-            # Update .zattrs (legacy format)
-            zattrs_path = zarr_dir / ".zattrs"
-            if zattrs_path.exists():
-                with open(zattrs_path, "r") as f:
-                    zattrs = json.load(f)
-                if "_squid_metadata" not in zattrs:
-                    zattrs["_squid_metadata"] = {}
-                zattrs["_squid_metadata"]["acquisition_complete"] = True
-                with open(zattrs_path, "w") as f:
-                    json.dump(zattrs, f, indent=2)
 
 
 def main() -> int:
