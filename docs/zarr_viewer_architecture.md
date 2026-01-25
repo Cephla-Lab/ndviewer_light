@@ -189,6 +189,5 @@ Channel names, colors, and pixel sizes are read from `zarr.json` metadata follow
 
 ## Related Files
 
-- `ndviewer_light/core.py` - Main viewer implementation
-- `ndviewer_light/zarr_v3.py` - Zarr v3 metadata parsing and tensorstore helpers
+- `ndviewer_light/core.py` - Main viewer implementation (includes zarr v3 support)
 - `simulate_zarr_acquisition.py` - Test script for zarr viewing
