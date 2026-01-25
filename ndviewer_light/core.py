@@ -81,6 +81,7 @@ if TYPE_CHECKING:
 TIFF_EXTENSIONS = {".tif", ".tiff"}
 LIVE_REFRESH_INTERVAL_MS = 750
 SLIDER_PLAY_INTERVAL_MS = 100  # Animation interval for play buttons
+ZARR_LOAD_DEBOUNCE_MS = 200  # Debounce interval for zarr frame loading
 PLANE_CACHE_MAX_MEMORY_BYTES = 256 * 1024 * 1024  # 256MB for z-stack plane cache
 
 # Play button style (matches NDV's PlayButton)
@@ -987,6 +988,11 @@ def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
             logger.debug("Failed to read .zattrs: %s", e)
 
     if not attrs:
+        if zarr_json_path.exists() or zattrs_path.exists():
+            logger.warning(
+                "Metadata files exist but could not be parsed for %s, using defaults",
+                zarr_path,
+            )
         return result
 
     # Handle both old format (multiscales at root) and new format (ome.multiscales)
@@ -2094,8 +2100,12 @@ class LightweightViewer(QWidget):
             if len(fov_paths) != len(fov_labels):
                 logger.warning(
                     f"fov_paths length ({len(fov_paths)}) does not match "
-                    f"fov_labels length ({len(fov_labels)})"
+                    f"fov_labels length ({len(fov_labels)}), truncating to shorter"
                 )
+                min_len = min(len(fov_paths), len(fov_labels))
+                fov_paths = fov_paths[:min_len]
+                fov_labels = list(fov_labels)[:min_len]
+                self._fov_labels = fov_labels
             self._zarr_fov_paths = [Path(p) for p in fov_paths]
             self._zarr_acquisition_path = None  # Not used in per-FOV mode
         else:
@@ -2234,7 +2244,7 @@ class LightweightViewer(QWidget):
             self._zarr_debounce_timer.timeout.connect(self._execute_zarr_debounced_load)
 
         if not self._zarr_debounce_timer.isActive():
-            self._zarr_debounce_timer.start(200)  # 200ms debounce
+            self._zarr_debounce_timer.start(ZARR_LOAD_DEBOUNCE_MS)
 
     def _execute_zarr_debounced_load(self):
         """Execute the debounced zarr load."""
@@ -3355,7 +3365,8 @@ class LightweightViewer(QWidget):
         if axes:
             axis_names = [ax.get("name", "").lower() for ax in axes]
         else:
-            # Infer from shape length
+            # Fallback: infer axis order from shape length when metadata is missing.
+            # Assumes OME-NGFF conventions (T, C, Z, Y, X) or (T, FOV, C, Z, Y, X).
             if len(shape) == 6:
                 axis_names = ["t", "fov", "c", "z", "y", "x"]
             elif len(shape) == 5:
@@ -3402,7 +3413,7 @@ class LightweightViewer(QWidget):
         # Transpose to standard order: (time, fov, z, channel, y, x)
         # Build transpose order based on current axis order
         target_order = ["t", "fov", "z", "c", "y", "x"]
-        current_order = axis_names
+        current_order = list(axis_names)  # Copy to avoid mutating original
 
         # Ensure all target axes exist
         for ax in target_order:
