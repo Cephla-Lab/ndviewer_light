@@ -283,7 +283,7 @@ class TestMultiRegion6D:
 
     def test_global_fov_to_region_boundary_cases(self):
         """Test boundary cases in global FOV conversion."""
-        fovs_per_region = [1, 1, 1]  # Single FOV per region
+        # Single FOV per region: fovs_per_region = [1, 1, 1]
         region_fov_offsets = [0, 1, 2]
         total_fovs = 3
 
