@@ -48,6 +48,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libegl1
 
+      - name: Debug imports
+        shell: bash -l {0}
+        run: |
+          conda activate ndviewer_light
+          python -c "import ndviewer_light; print('Location:', ndviewer_light.__file__)"
+          python -c "from ndviewer_light.core import discover_zarr_v3_fovs; print('Direct import OK')"
+          python -c "from ndviewer_light import discover_zarr_v3_fovs; print('Package import OK')"
+
       - name: Run tests
         shell: bash -l {0}
         run: |
