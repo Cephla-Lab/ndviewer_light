@@ -2194,17 +2194,9 @@ class LightweightViewer(QWidget):
             for i, c in enumerate(self._channel_names)
         }
 
-        # Try to open zarr store (may not exist yet during acquisition start)
-        # Per-FOV stores are opened lazily in _load_zarr_plane to avoid
-        # opening all stores upfront when there may be many FOVs.
-        if not self._zarr_fov_paths:
-            try:
-                self._zarr_acquisition_store = open_zarr_tensorstore(
-                    Path(zarr_path), array_path="0"
-                )
-            except Exception as e:
-                logger.debug("Zarr store not yet available: %s", e)
-                self._zarr_acquisition_store = None
+        # Note: Zarr stores are opened lazily in _load_zarr_plane to avoid
+        # blocking I/O at acquisition start. The store may not exist yet when
+        # this method is called since the writer creates it asynchronously.
 
         # Reset navigation state
         self._current_fov_idx = 0
