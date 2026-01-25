@@ -77,6 +77,15 @@ SliderLabel { font-size: 10px; }
 if TYPE_CHECKING:
     import xarray as xr
 
+# Try to import tensorstore for zarr v3 support
+try:
+    import tensorstore as ts
+
+    TENSORSTORE_AVAILABLE = True
+except ImportError:
+    ts = None
+    TENSORSTORE_AVAILABLE = False
+
 # Constants
 TIFF_EXTENSIONS = {".tif", ".tiff"}
 LIVE_REFRESH_INTERVAL_MS = 750
@@ -866,6 +875,64 @@ def detect_format(base_path: Path) -> str:
         if any(".ome" in f.name for f in first_tp.glob("*.tif*")):
             return "ome_tiff"
     return "single_tiff"
+
+
+def detect_zarr_version(path: Path) -> Optional[int]:
+    """Detect if path is zarr v2 (.zgroup/.zarray) or v3 (zarr.json).
+
+    Args:
+        path: Path to zarr store
+
+    Returns:
+        2 for zarr v2, 3 for zarr v3, None if unknown
+    """
+    if (path / "zarr.json").exists():
+        return 3
+    if (path / ".zgroup").exists() or (path / ".zarray").exists():
+        return 2
+    # Check for array subdirectory (e.g., "0")
+    arr_path = path / "0"
+    if arr_path.is_dir():
+        if (arr_path / "zarr.json").exists():
+            return 3
+        if (arr_path / ".zarray").exists():
+            return 2
+    return None
+
+
+def open_zarr_tensorstore(path: Path, array_path: str = "0") -> Optional[Any]:
+    """Open a zarr store using tensorstore, auto-detecting v2/v3 format.
+
+    Args:
+        path: Path to zarr store
+        array_path: Path to array within store (default "0" for OME-NGFF)
+
+    Returns:
+        TensorStore array object, or None if failed
+    """
+    if not TENSORSTORE_AVAILABLE:
+        return None
+
+    version = detect_zarr_version(path)
+    if version is None:
+        logger.warning(f"Could not detect zarr version for {path}")
+        return None
+
+    # Build tensorstore spec
+    driver = "zarr3" if version == 3 else "zarr"
+    full_path = path / array_path if array_path else path
+
+    spec = {
+        "driver": driver,
+        "kvstore": {"driver": "file", "path": str(full_path)},
+    }
+
+    try:
+        store = ts.open(spec, read=True).result()
+        return store
+    except Exception as e:
+        logger.debug(f"Failed to open zarr store with tensorstore: {e}")
+        return None
 
 
 def wavelength_to_colormap(wavelength: Optional[int]) -> str:
@@ -2447,7 +2514,9 @@ class LightweightViewer(QWidget):
     def _load_zarr_plane(
         self, t: int, fov_idx: int, z: int, channel_idx: int
     ) -> np.ndarray:
-        """Load a single plane from the zarr store.
+        """Load a single plane from the zarr store using tensorstore.
+
+        Uses tensorstore to support both zarr v2 and v3 formats.
 
         Args:
             t: Timepoint index
@@ -2458,8 +2527,6 @@ class LightweightViewer(QWidget):
         Returns:
             Image plane as numpy array, or zeros if not available.
         """
-        import zarr
-
         cache_key = ("zarr", t, fov_idx, z, channel_idx)
 
         # Check cache first
@@ -2468,7 +2535,7 @@ class LightweightViewer(QWidget):
             return cached_plane
 
         # Determine which store to use based on mode
-        store = None
+        arr = None
 
         if self._zarr_6d_regions_mode:
             # 6D regions mode: each region has its own store with (FOV, T, C, Z, Y, X)
@@ -2485,39 +2552,26 @@ class LightweightViewer(QWidget):
 
             # Get or open the store for this region (lazy loading)
             if region_idx not in self._zarr_region_stores:
-                try:
+                region_path = self._zarr_region_paths[region_idx]
+                logger.debug(
+                    f"Opening zarr store for region {region_idx}: {region_path}"
+                )
+                ts_arr = open_zarr_tensorstore(region_path, array_path="0")
+                if ts_arr is None:
                     logger.debug(
-                        f"Opening zarr store for region {region_idx}: {self._zarr_region_paths[region_idx]}"
-                    )
-                    self._zarr_region_stores[region_idx] = zarr.open(
-                        str(self._zarr_region_paths[region_idx]), mode="r"
-                    )
-                except (FileNotFoundError, PermissionError) as e:
-                    logger.debug(
-                        f"Zarr store not accessible for region {region_idx}: {e}"
+                        f"Zarr store not accessible for region {region_idx}"
                     )
                     return np.zeros(
                         (self._image_height, self._image_width), dtype=np.uint16
                     )
-                except Exception as e:
-                    logger.warning(
-                        f"Could not open zarr store for region {region_idx}: {e}"
-                    )
-                    return np.zeros(
-                        (self._image_height, self._image_width), dtype=np.uint16
-                    )
+                self._zarr_region_stores[region_idx] = ts_arr
 
-            store = self._zarr_region_stores[region_idx]
+            arr = self._zarr_region_stores[region_idx]
 
             # Read from 6D array: (FOV, T, C, Z, Y, X)
             try:
-                if "0" in store:
-                    arr = store["0"]
-                else:
-                    arr = store
-
                 # Index 6D: (FOV, T, C, Z, Y, X) → arr[fov, t, c, z, :, :]
-                plane = arr[local_fov_idx, t, channel_idx, z, :, :]
+                plane = arr[local_fov_idx, t, channel_idx, z, :, :].read().result()
                 plane = np.asarray(plane)
                 # Cache if not in live acquisition, or if plane was explicitly written
                 # This prevents caching unwritten (zero) planes during live acquisition
@@ -2556,65 +2610,48 @@ class LightweightViewer(QWidget):
 
             # Get or open the store for this FOV
             if fov_idx not in self._zarr_fov_stores:
-                try:
-                    self._zarr_fov_stores[fov_idx] = zarr.open(
-                        str(self._zarr_fov_paths[fov_idx]), mode="r"
-                    )
-                except (FileNotFoundError, PermissionError) as e:
-                    logger.debug(f"Zarr store not accessible for FOV {fov_idx}: {e}")
+                fov_path = self._zarr_fov_paths[fov_idx]
+                ts_arr = open_zarr_tensorstore(fov_path, array_path="0")
+                if ts_arr is None:
+                    logger.debug(f"Zarr store not accessible for FOV {fov_idx}")
                     return np.zeros(
                         (self._image_height, self._image_width), dtype=np.uint16
                     )
-                except Exception as e:
-                    logger.warning(f"Could not open zarr store for FOV {fov_idx}: {e}")
-                    return np.zeros(
-                        (self._image_height, self._image_width), dtype=np.uint16
-                    )
+                self._zarr_fov_stores[fov_idx] = ts_arr
 
-            store = self._zarr_fov_stores[fov_idx]
+            arr = self._zarr_fov_stores[fov_idx]
 
         else:
             # Single-store mode (single/6d structures)
             if self._zarr_acquisition_store is None and self._zarr_acquisition_path:
-                try:
-                    self._zarr_acquisition_store = zarr.open(
-                        str(self._zarr_acquisition_path), mode="r"
-                    )
-                except (FileNotFoundError, PermissionError) as e:
-                    logger.debug("Zarr store not accessible: %s", e)
+                ts_arr = open_zarr_tensorstore(
+                    self._zarr_acquisition_path, array_path="0"
+                )
+                if ts_arr is None:
+                    logger.debug("Zarr store not accessible")
                     return np.zeros(
                         (self._image_height, self._image_width), dtype=np.uint16
                     )
-                except Exception as e:
-                    logger.warning("Could not open zarr store: %s", e)
-                    return np.zeros(
-                        (self._image_height, self._image_width), dtype=np.uint16
-                    )
+                self._zarr_acquisition_store = ts_arr
 
-            store = self._zarr_acquisition_store
+            arr = self._zarr_acquisition_store
 
-        if store is None:
+        if arr is None:
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            # Get data array (level 0 for highest resolution)
-            if "0" in store:
-                arr = store["0"]
-            else:
-                arr = store
-
             # Read plane: typical zarr order is (T, C, Z, Y, X) or (T, FOV, C, Z, Y, X)
             # Try different indexing based on array dimensions
             ndim = len(arr.shape)
             if ndim == 6:
                 # (T, FOV, C, Z, Y, X)
-                plane = arr[t, fov_idx, channel_idx, z, :, :]
+                plane = arr[t, fov_idx, channel_idx, z, :, :].read().result()
             elif ndim == 5:
                 # (T, C, Z, Y, X) - single FOV or per-FOV store
-                plane = arr[t, channel_idx, z, :, :]
+                plane = arr[t, channel_idx, z, :, :].read().result()
             elif ndim == 4:
                 # (C, Z, Y, X) - single timepoint
-                plane = arr[channel_idx, z, :, :]
+                plane = arr[channel_idx, z, :, :].read().result()
             else:
                 logger.warning(f"Unexpected zarr dimensions: {arr.shape}")
                 return np.zeros(
@@ -3473,6 +3510,8 @@ class LightweightViewer(QWidget):
     ) -> Optional[xr.DataArray]:
         """Load zarr v3 dataset (OME-NGFF format from Squid).
 
+        Uses tensorstore to support both zarr v2 and v3 formats.
+
         Args:
             base_path: Dataset root directory
             fovs: List of FOV dicts from discover_zarr_v3_fovs
@@ -3481,8 +3520,6 @@ class LightweightViewer(QWidget):
         Returns:
             xarray.DataArray with dims (time, fov, z, channel, y, x)
         """
-        import zarr
-
         try:
             if structure_type == "6d_single":
                 return self._load_zarr_v3_6d(fovs[0]["path"])
@@ -3500,9 +3537,9 @@ class LightweightViewer(QWidget):
 
         Each FOV is a separate zarr store with dimensions (T, C, Z, Y, X).
         Stacks them along a new FOV axis.
-        """
-        import zarr
 
+        Uses tensorstore to support both zarr v2 and v3 formats.
+        """
         if not fovs:
             return None
 
@@ -3510,19 +3547,14 @@ class LightweightViewer(QWidget):
         first_path = fovs[0]["path"]
         meta = parse_zarr_v3_metadata(first_path)
 
-        # Open first zarr to get shape/dtype
-        try:
-            store = zarr.open(str(first_path), mode="r")
-            # Data is at level 0 (highest resolution)
-            if "0" in store:
-                arr = store["0"]
-            else:
-                arr = store
-            shape = arr.shape
-            dtype = arr.dtype
-        except Exception as e:
-            logger.error("Failed to open zarr store %s: %s", first_path, e)
+        # Open first zarr to get shape/dtype using tensorstore
+        ts_arr = open_zarr_tensorstore(first_path, array_path="0")
+        if ts_arr is None:
+            logger.error("Failed to open zarr store %s", first_path)
             return None
+
+        shape = ts_arr.shape
+        dtype = ts_arr.dtype.numpy_dtype
 
         # Determine axis order from metadata or infer from shape
         # Typical OME-NGFF order: (T, C, Z, Y, X)
@@ -3560,22 +3592,20 @@ class LightweightViewer(QWidget):
             else:
                 luts[i] = wavelength_to_colormap(extract_wavelength(name))
 
-        # Create dask arrays for each FOV
+        # Create dask arrays for each FOV using tensorstore
         fov_arrays = []
         for fov_info in fovs:
             fov_path = fov_info["path"]
             try:
-                store = zarr.open(str(fov_path), mode="r")
-                if "0" in store:
-                    zarr_arr = store["0"]
-                else:
-                    zarr_arr = store
+                ts_arr = open_zarr_tensorstore(fov_path, array_path="0")
+                if ts_arr is None:
+                    raise RuntimeError(f"Could not open zarr store at {fov_path}")
 
                 # Create dask array with per-plane chunks
                 chunks = tuple(
                     1 if i < len(shape) - 2 else s for i, s in enumerate(shape)
                 )
-                darr = da.from_zarr(zarr_arr, chunks=chunks)
+                darr = da.from_array(ts_arr, chunks=chunks)
 
                 # Ensure shape is (T, C, Z, Y, X)
                 if len(darr.shape) == 4:
@@ -3633,21 +3663,16 @@ class LightweightViewer(QWidget):
         """Load a single 6D zarr v3 store with FOV dimension.
 
         Handles zarr stores with dimensions like (T, FOV, C, Z, Y, X).
+        Uses tensorstore to support both zarr v2 and v3 formats.
         """
-        import zarr
-
         meta = parse_zarr_v3_metadata(zarr_path)
 
-        try:
-            store = zarr.open(str(zarr_path), mode="r")
-            if "0" in store:
-                zarr_arr = store["0"]
-            else:
-                zarr_arr = store
-            shape = zarr_arr.shape
-        except Exception as e:
-            logger.error("Failed to open zarr store %s: %s", zarr_path, e)
+        # Open zarr store using tensorstore
+        ts_arr = open_zarr_tensorstore(zarr_path, array_path="0")
+        if ts_arr is None:
+            logger.error("Failed to open zarr store %s", zarr_path)
             return None
+        shape = ts_arr.shape
 
         # Determine axis order
         axes = meta.get("axes", [])
@@ -3694,9 +3719,9 @@ class LightweightViewer(QWidget):
             else:
                 luts[i] = wavelength_to_colormap(extract_wavelength(name))
 
-        # Create dask array with per-plane chunks
+        # Create dask array with per-plane chunks using tensorstore array
         chunks = tuple(1 if i < len(shape) - 2 else s for i, s in enumerate(shape))
-        darr = da.from_zarr(zarr_arr, chunks=chunks)
+        darr = da.from_array(ts_arr, chunks=chunks)
 
         # Transpose to standard order: (time, fov, z, channel, y, x)
         # Build transpose order based on current axis order
