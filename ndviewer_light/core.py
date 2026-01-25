@@ -2046,6 +2046,11 @@ class LightweightViewer(QWidget):
 
         # Handle per-FOV paths (for per_fov and hcs structures)
         if fov_paths:
+            if len(fov_paths) != len(fov_labels):
+                logger.warning(
+                    f"fov_paths length ({len(fov_paths)}) does not match "
+                    f"fov_labels length ({len(fov_labels)})"
+                )
             self._zarr_fov_paths = [Path(p) for p in fov_paths]
             self._zarr_acquisition_path = None  # Not used in per-FOV mode
         else:
@@ -2061,11 +2066,10 @@ class LightweightViewer(QWidget):
             for i, c in enumerate(self._channel_names)
         }
 
-        # Try to open zarr store(s) (may not exist yet during acquisition start)
-        if self._zarr_fov_paths:
-            # Per-FOV mode: stores are opened lazily in _load_zarr_plane
-            pass
-        else:
+        # Try to open zarr store (may not exist yet during acquisition start)
+        # Per-FOV stores are opened lazily in _load_zarr_plane to avoid
+        # opening all stores upfront when there may be many FOVs.
+        if not self._zarr_fov_paths:
             try:
                 self._zarr_acquisition_store = zarr.open(str(zarr_path), mode="r")
             except Exception as e:
@@ -2218,12 +2222,13 @@ class LightweightViewer(QWidget):
 
         # Determine which store to use based on mode
         store = None
-        use_fov_in_index = False  # Whether array has FOV dimension
 
         if self._zarr_fov_paths:
             # Per-FOV mode: each FOV has its own store
             if fov_idx >= len(self._zarr_fov_paths):
-                logger.debug(f"FOV index {fov_idx} out of range")
+                logger.warning(
+                    f"FOV index {fov_idx} out of range (max: {len(self._zarr_fov_paths) - 1})"
+                )
                 return np.zeros(
                     (self._image_height, self._image_width), dtype=np.uint16
                 )
@@ -2234,14 +2239,18 @@ class LightweightViewer(QWidget):
                     self._zarr_fov_stores[fov_idx] = zarr.open(
                         str(self._zarr_fov_paths[fov_idx]), mode="r"
                     )
+                except (FileNotFoundError, PermissionError) as e:
+                    logger.debug(f"Zarr store not accessible for FOV {fov_idx}: {e}")
+                    return np.zeros(
+                        (self._image_height, self._image_width), dtype=np.uint16
+                    )
                 except Exception as e:
-                    logger.debug(f"Could not open zarr store for FOV {fov_idx}: {e}")
+                    logger.warning(f"Could not open zarr store for FOV {fov_idx}: {e}")
                     return np.zeros(
                         (self._image_height, self._image_width), dtype=np.uint16
                     )
 
             store = self._zarr_fov_stores[fov_idx]
-            use_fov_in_index = False  # Per-FOV stores don't have FOV dimension
 
         else:
             # Single-store mode (single/6d structures)
@@ -2250,8 +2259,13 @@ class LightweightViewer(QWidget):
                     self._zarr_acquisition_store = zarr.open(
                         str(self._zarr_acquisition_path), mode="r"
                     )
+                except (FileNotFoundError, PermissionError) as e:
+                    logger.debug("Zarr store not accessible: %s", e)
+                    return np.zeros(
+                        (self._image_height, self._image_width), dtype=np.uint16
+                    )
                 except Exception as e:
-                    logger.debug("Could not open zarr store: %s", e)
+                    logger.warning("Could not open zarr store: %s", e)
                     return np.zeros(
                         (self._image_height, self._image_width), dtype=np.uint16
                     )
@@ -2290,8 +2304,15 @@ class LightweightViewer(QWidget):
             self._plane_cache.put(cache_key, plane)
             return plane
 
-        except Exception as e:
+        except (IndexError, KeyError) as e:
+            # Expected errors when data not yet written
             logger.debug(
+                f"Zarr plane not available (t={t}, fov={fov_idx}, z={z}, ch={channel_idx}): {e}"
+            )
+            return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+        except Exception as e:
+            # Unexpected errors - log with more visibility
+            logger.warning(
                 f"Failed to load zarr plane (t={t}, fov={fov_idx}, z={z}, ch={channel_idx}): {e}"
             )
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
@@ -2391,6 +2412,8 @@ class LightweightViewer(QWidget):
         # Clean up zarr state
         self._zarr_acquisition_store = None
         self._zarr_acquisition_path = None
+        self._zarr_fov_stores.clear()
+        self._zarr_fov_paths = []
         self._close_open_handles()
         super().closeEvent(event)
 

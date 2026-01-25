@@ -438,28 +438,34 @@ class ZarrAcquisitionSimulator:
         """Called when acquisition is complete."""
         self.timer.stop()
 
-        # Update metadata to mark acquisition as complete
-        if self.structure in ("single", "6d"):
-            zattrs_path = self.fov_paths[0] / ".zattrs"
-            if zattrs_path.exists():
-                with open(zattrs_path, "r") as f:
-                    zattrs = json.load(f)
-                zattrs["_squid_metadata"]["acquisition_complete"] = True
-                with open(zattrs_path, "w") as f:
-                    json.dump(zattrs, f, indent=2)
-        else:
-            # Update all FOV stores
-            for zarr_path in self.fov_paths:
-                zattrs_path = zarr_path / ".zattrs"
-                if zattrs_path.exists():
-                    with open(zattrs_path, "r") as f:
-                        zattrs = json.load(f)
-                    zattrs["_squid_metadata"]["acquisition_complete"] = True
-                    with open(zattrs_path, "w") as f:
-                        json.dump(zattrs, f, indent=2)
+        # Update metadata to mark acquisition as complete (best-effort)
+        try:
+            self._mark_acquisition_complete()
+        except Exception as e:
+            print(f"Warning: Could not update acquisition metadata: {e}")
 
+        # Always call end_zarr_acquisition, even if metadata update failed
         self.viewer.end_zarr_acquisition()
         print("Acquisition complete. Browse the dataset in the viewer.")
+
+    def _mark_acquisition_complete(self):
+        """Update .zattrs files to mark acquisition as complete."""
+        paths_to_update = []
+        if self.structure in ("single", "6d"):
+            paths_to_update = [self.fov_paths[0] / ".zattrs"]
+        else:
+            paths_to_update = [p / ".zattrs" for p in self.fov_paths]
+
+        for zattrs_path in paths_to_update:
+            if not zattrs_path.exists():
+                continue
+            with open(zattrs_path, "r") as f:
+                zattrs = json.load(f)
+            if "_squid_metadata" not in zattrs:
+                zattrs["_squid_metadata"] = {}
+            zattrs["_squid_metadata"]["acquisition_complete"] = True
+            with open(zattrs_path, "w") as f:
+                json.dump(zattrs, f, indent=2)
 
 
 def main() -> int:
@@ -496,8 +502,8 @@ Examples:
     ap.add_argument(
         "--interval",
         type=float,
-        default=0.5,
-        help="Seconds between plane writes (default: 0.5).",
+        default=0.05,
+        help="Seconds between plane writes (default: 0.05).",
     )
     ap.add_argument(
         "--n-fov",
