@@ -2534,9 +2534,7 @@ class LightweightViewer(QWidget):
                 )
                 ts_arr = open_zarr_tensorstore(region_path, array_path="0")
                 if ts_arr is None:
-                    logger.debug(
-                        f"Zarr store not accessible for region {region_idx}"
-                    )
+                    logger.debug(f"Zarr store not accessible for region {region_idx}")
                     return np.zeros(
                         (self._image_height, self._image_width), dtype=np.uint16
                     )

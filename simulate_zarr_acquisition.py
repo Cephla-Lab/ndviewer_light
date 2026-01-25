@@ -320,7 +320,14 @@ class ZarrAcquisitionSimulator:
                 zarr_path = self.fov_paths[region_idx]  # fov_paths holds region paths
                 zarr_path.mkdir(parents=True, exist_ok=True)
                 # Shape: (FOV, T, C, Z, Y, X)
-                shape = (n_fov_in_region, self.n_t, n_c, self.n_z, self.height, self.width)
+                shape = (
+                    n_fov_in_region,
+                    self.n_t,
+                    n_c,
+                    self.n_z,
+                    self.height,
+                    self.width,
+                )
                 chunks = (1, 1, 1, 1, self.height, self.width)
                 arr = self._create_tensorstore_array(zarr_path / "0", shape, chunks)
                 self.zarr_arrays[region_idx] = arr
@@ -338,7 +345,14 @@ class ZarrAcquisitionSimulator:
                         {"name": "y", "type": "space", "unit": "micrometer"},
                         {"name": "x", "type": "space", "unit": "micrometer"},
                     ],
-                    scale=[1, 1, 1, self.z_step_um, self.pixel_size_um, self.pixel_size_um],
+                    scale=[
+                        1,
+                        1,
+                        1,
+                        self.z_step_um,
+                        self.pixel_size_um,
+                        self.pixel_size_um,
+                    ],
                 )
             print(f"Created 6D zarr v3 stores: {self.n_regions} regions")
             for i, (label, n_fov) in enumerate(
