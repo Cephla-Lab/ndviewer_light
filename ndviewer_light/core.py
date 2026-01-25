@@ -2647,7 +2647,7 @@ class LightweightViewer(QWidget):
     def _load_current_zarr_fov(self):
         """Load and display data for the current FOV from zarr store.
 
-        Creates a lazy dask array that only loads planes when NDV requests them.
+        Creates a lazy dask array. Retries if store not ready yet.
         """
         if not self._channel_names or not self._z_levels:
             return
@@ -2657,6 +2657,16 @@ class LightweightViewer(QWidget):
         t = self._current_time_idx
         fov_idx = self._current_fov_idx
         h, w = self._image_height, self._image_width
+
+        # Check if store is ready (zarr.json exists) before creating dask array
+        # This handles per_fov mode where each FOV has its own store
+        if self._zarr_fov_paths and fov_idx < len(self._zarr_fov_paths):
+            zarr_json = self._zarr_fov_paths[fov_idx] / "zarr.json"
+            if not zarr_json.exists():
+                # Store not ready yet, retry later
+                if self._zarr_acquisition_active:
+                    QTimer.singleShot(500, self._load_current_zarr_fov)
+                return
 
         import dask
         import dask.array as da
