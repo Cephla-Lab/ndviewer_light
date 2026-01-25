@@ -1,13 +1,13 @@
 # Shim for submodule usage in Squid
 # Re-exports from the nested ndviewer_light package
 from .ndviewer_light import (
-    __version__,
     FPATTERN,
     FPATTERN_OME,
     MAX_3D_TEXTURE_SIZE,
     LightweightMainWindow,
     LightweightViewer,
     MemoryBoundedLRUCache,
+    __version__,
     data_structure_changed,
     detect_format,
     discover_zarr_v3_fovs,

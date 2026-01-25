@@ -2783,7 +2783,7 @@ class LightweightViewer(QWidget):
         fmt = detect_format(base)
 
         if fmt == "zarr_v3":
-            # For zarr v3, check .zattrs mtime and acquisition_complete flag
+            # For zarr v3, check zarr.json mtime and acquisition_complete flag
             fovs, structure_type = discover_zarr_v3_fovs(base)
             if not fovs:
                 return (fmt, 0, False, 0)
@@ -3507,6 +3507,9 @@ class LightweightViewer(QWidget):
 
         Uses tensorstore to support both zarr v2 and v3 formats.
         """
+        import dask.array as da
+        import xarray as xr
+
         if not fovs:
             return None
 
@@ -3632,6 +3635,9 @@ class LightweightViewer(QWidget):
         Handles zarr stores with dimensions like (T, FOV, C, Z, Y, X).
         Uses tensorstore to support both zarr v2 and v3 formats.
         """
+        import dask.array as da
+        import xarray as xr
+
         meta = parse_zarr_v3_metadata(zarr_path)
 
         # Open zarr store using tensorstore
