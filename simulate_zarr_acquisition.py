@@ -327,7 +327,8 @@ class ZarrAcquisitionSimulator:
                     self.width,
                 )
                 chunks = (1, 1, 1, 1, self.height, self.width)
-                arr = self._create_tensorstore_array(zarr_path / "0", shape, chunks)
+                # 6D mode: array directly at acquisition.zarr root (not /0 subdirectory)
+                arr = self._create_tensorstore_array(zarr_path, shape, chunks)
                 self.zarr_arrays[region_idx] = arr
                 _write_zarr_metadata(
                     zarr_path,
