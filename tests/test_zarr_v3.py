@@ -11,12 +11,15 @@ import json
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pytest
+import tensorstore as ts
 
 from ndviewer_light import (
     detect_format,
     discover_zarr_v3_fovs,
     hex_to_colormap,
+    open_zarr_tensorstore,
     parse_zarr_v3_metadata,
 )
 
@@ -538,3 +541,126 @@ class TestNewSquidFormat:
             assert meta["axes"] == []
             assert meta["pixel_size_um"] is None
             assert meta["channel_names"] == []
+
+
+class TestOpenZarrTensorstore:
+    """Test suite for tensorstore-based zarr loading."""
+
+    def _create_zarr_v3_array(
+        self, path: Path, shape: tuple, dtype=np.uint16
+    ) -> np.ndarray:
+        """Helper to create a zarr v3 array with tensorstore."""
+        spec = {
+            "driver": "zarr3",
+            "kvstore": {"driver": "file", "path": str(path)},
+            "metadata": {
+                "shape": list(shape),
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": {"chunk_shape": list(shape)},
+                },
+                "chunk_key_encoding": {"name": "default"},
+                "data_type": dtype.__name__,
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+            },
+            "create": True,
+            "delete_existing": True,
+        }
+        store = ts.open(spec).result()
+        # Write test data
+        data = np.arange(np.prod(shape), dtype=dtype).reshape(shape)
+        store[...] = data
+        return data
+
+    def test_open_zarr_v3_array(self):
+        """Test opening a zarr v3 array with tensorstore."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zarr_path = Path(tmpdir) / "test.zarr"
+            zarr_path.mkdir()
+            _write_zarr_json(zarr_path)
+
+            # Create array at "0" path (OME-NGFF convention)
+            array_path = zarr_path / "0"
+            shape = (2, 3, 64, 64)  # T, C, Y, X
+            expected_data = self._create_zarr_v3_array(array_path, shape)
+
+            # Open with our function
+            arr = open_zarr_tensorstore(zarr_path, array_path="0")
+
+            assert arr is not None
+            assert arr.shape == shape
+            assert arr.dtype == np.uint16
+            # Verify data matches
+            np.testing.assert_array_equal(arr[...].read().result(), expected_data)
+
+    def test_open_zarr_v3_5d_shape(self):
+        """Test opening a 5D zarr array (T, C, Z, Y, X)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zarr_path = Path(tmpdir) / "fov.zarr"
+            zarr_path.mkdir()
+            _write_zarr_json(zarr_path)
+
+            array_path = zarr_path / "0"
+            shape = (3, 2, 5, 128, 128)  # T, C, Z, Y, X
+            self._create_zarr_v3_array(array_path, shape)
+
+            arr = open_zarr_tensorstore(zarr_path, array_path="0")
+
+            assert arr is not None
+            assert arr.shape == shape
+            assert len(arr.shape) == 5
+
+    def test_open_zarr_v3_6d_shape(self):
+        """Test opening a 6D zarr array (T, FOV, C, Z, Y, X)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zarr_path = Path(tmpdir) / "acquisition.zarr"
+            zarr_path.mkdir()
+            _write_zarr_json(zarr_path)
+
+            array_path = zarr_path / "0"
+            shape = (2, 4, 3, 5, 64, 64)  # T, FOV, C, Z, Y, X
+            self._create_zarr_v3_array(array_path, shape)
+
+            arr = open_zarr_tensorstore(zarr_path, array_path="0")
+
+            assert arr is not None
+            assert arr.shape == shape
+            assert len(arr.shape) == 6
+
+    def test_open_nonexistent_path_returns_none(self):
+        """Test that opening a nonexistent path returns None."""
+        arr = open_zarr_tensorstore(Path("/nonexistent/path.zarr"), array_path="0")
+        assert arr is None
+
+    def test_open_invalid_zarr_returns_none(self):
+        """Test that opening an invalid zarr store returns None."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zarr_path = Path(tmpdir) / "invalid.zarr"
+            zarr_path.mkdir()
+            # Write invalid zarr.json
+            (zarr_path / "zarr.json").write_text("not valid json")
+
+            arr = open_zarr_tensorstore(zarr_path, array_path="0")
+            assert arr is None
+
+    def test_tensorstore_slicing(self):
+        """Test that tensorstore array supports slicing for lazy loading."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zarr_path = Path(tmpdir) / "test.zarr"
+            zarr_path.mkdir()
+            _write_zarr_json(zarr_path)
+
+            array_path = zarr_path / "0"
+            shape = (2, 3, 4, 32, 32)  # T, C, Z, Y, X
+            expected_data = self._create_zarr_v3_array(array_path, shape)
+
+            arr = open_zarr_tensorstore(zarr_path, array_path="0")
+
+            # Test single plane extraction (what viewer does)
+            plane = arr[0, 1, 2, :, :].read().result()
+            assert plane.shape == (32, 32)
+            np.testing.assert_array_equal(plane, expected_data[0, 1, 2, :, :])
+
+            # Test range slicing
+            subset = arr[0:1, 0:2, :, :, :].read().result()
+            assert subset.shape == (1, 2, 4, 32, 32)
