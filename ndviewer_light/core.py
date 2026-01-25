@@ -2198,7 +2198,9 @@ class LightweightViewer(QWidget):
         # opening all stores upfront when there may be many FOVs.
         if not self._zarr_fov_paths:
             try:
-                self._zarr_acquisition_store = zarr.open(str(zarr_path), mode="r")
+                self._zarr_acquisition_store = open_zarr_tensorstore(
+                    Path(zarr_path), array_path="0"
+                )
             except Exception as e:
                 logger.debug("Zarr store not yet available: %s", e)
                 self._zarr_acquisition_store = None
