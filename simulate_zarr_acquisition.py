@@ -100,10 +100,15 @@ def _write_zarr_metadata(
     acquisition_complete: bool = False,
     axes: Optional[list[dict]] = None,
     scale: Optional[list[float]] = None,
+    merge_into_existing: bool = False,
 ) -> None:
     """Write OME-NGFF metadata to zarr.json (zarr v3 format).
 
     Writes metadata to zarr.json -> attributes with ome.multiscales/omero and _squid.
+
+    Args:
+        merge_into_existing: If True, merge attributes into existing zarr.json
+            (for 6D mode where array is at root). If False, create new group zarr.json.
     """
     if axes is None:
         axes = [
@@ -147,13 +152,21 @@ def _write_zarr_metadata(
         },
     }
 
-    # Write to zarr.json with proper zarr v3 group structure
     zarr_json_path = zarr_path / "zarr.json"
-    zarr_json = {
-        "zarr_format": 3,
-        "node_type": "group",
-        "attributes": attributes,
-    }
+
+    if merge_into_existing and zarr_json_path.exists():
+        # Merge attributes into existing array zarr.json (for 6D mode)
+        with open(zarr_json_path, "r") as f:
+            zarr_json = json.load(f)
+        zarr_json["attributes"] = attributes
+    else:
+        # Create new group zarr.json (for per_fov/hcs modes)
+        zarr_json = {
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": attributes,
+        }
+
     with open(zarr_json_path, "w") as f:
         json.dump(zarr_json, f, indent=2)
 
@@ -352,6 +365,7 @@ class ZarrAcquisitionSimulator:
                         self.pixel_size_um,
                         self.pixel_size_um,
                     ],
+                    merge_into_existing=True,  # 6D: array is at root, merge attrs
                 )
             print(f"Created 6D zarr v3 stores: {self.n_regions} regions")
             for i, (label, n_fov) in enumerate(
