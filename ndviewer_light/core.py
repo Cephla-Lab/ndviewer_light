@@ -2358,7 +2358,7 @@ class LightweightViewer(QWidget):
 
         logger.info(
             f"NDViewer: Started 6D regions zarr acquisition with {len(channels)} channels, "
-            f"{num_z} z-levels, {len(region_paths)} regions, {total_fovs} total FOVs"
+            f"{num_z} z-levels, {len(region_paths)} regions, {sum(fovs_per_region)} total FOVs"
         )
 
     def _global_to_region_fov(self, global_fov_idx: int) -> Tuple[int, int]:
