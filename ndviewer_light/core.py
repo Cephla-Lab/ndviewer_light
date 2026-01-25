@@ -1355,6 +1355,9 @@ class LightweightViewer(QWidget):
         self._zarr_channel_map: Dict[str, int] = {}
         self._zarr_debounce_timer: Optional[QTimer] = None  # Debounce for zarr loads
         self._zarr_load_pending: bool = False
+        # For per_fov and hcs structures: separate zarr path per FOV
+        self._zarr_fov_paths: List[Path] = []  # [fov0_path, fov1_path, ...]
+        self._zarr_fov_stores: Dict[int, Any] = {}  # fov_idx -> zarr store
 
         # Connect signals for thread-safe updates
         self._image_registered.connect(self._on_image_registered)
@@ -1419,8 +1422,10 @@ class LightweightViewer(QWidget):
         self._time_container.setVisible(False)  # Hidden by default until max > 0
         slider_layout.addWidget(self._time_container)
 
-        # FOV slider
-        fov_layout = QHBoxLayout()
+        # FOV slider (in a container so we can hide it when there's only one FOV)
+        self._fov_slider_container = QWidget()
+        fov_layout = QHBoxLayout(self._fov_slider_container)
+        fov_layout.setContentsMargins(0, 0, 0, 0)
         fov_layout.setSpacing(5)
         self._fov_label = QLabel("FOV")
         self._fov_label.setFixedWidth(30)
@@ -1436,7 +1441,7 @@ class LightweightViewer(QWidget):
         fov_layout.addWidget(self._fov_play_btn)
         fov_layout.addWidget(self._fov_label)
         fov_layout.addWidget(self._fov_slider)
-        slider_layout.addLayout(fov_layout)
+        slider_layout.addWidget(self._fov_slider_container)
 
         layout.addWidget(slider_container)
 
@@ -1491,10 +1496,15 @@ class LightweightViewer(QWidget):
 
         Routes to zarr loader if zarr acquisition is active, otherwise to TIFF loader.
         """
-        if self._zarr_acquisition_active or self._zarr_acquisition_path is not None:
+        if self.is_zarr_push_mode_active():
             self._load_current_zarr_fov()
         else:
             self._load_current_fov()
+
+    def _update_fov_slider_visibility(self):
+        """Show/hide FOV slider based on number of FOVs."""
+        n_fovs = len(self._fov_labels) if self._fov_labels else 1
+        self._fov_slider_container.setVisible(n_fovs > 1)
 
     def _on_time_play_clicked(self, checked: bool):
         """Handle time play button click."""
@@ -1629,6 +1639,9 @@ class LightweightViewer(QWidget):
 
         # Rebuild NDV viewer with channel configuration
         self._rebuild_viewer_for_acquisition()
+
+        # Show/hide FOV slider based on number of FOVs
+        self._update_fov_slider_visibility()
 
         logger.info(
             f"NDViewer: Started acquisition with {len(channels)} channels, "
@@ -1990,6 +2003,7 @@ class LightweightViewer(QWidget):
         fov_labels: List[str],
         height: int,
         width: int,
+        fov_paths: Optional[List[str]] = None,
     ):
         """Configure viewer for zarr-based live acquisition.
 
@@ -1997,12 +2011,14 @@ class LightweightViewer(QWidget):
         Sets up the viewer with channel configuration and opens the zarr store.
 
         Args:
-            zarr_path: Path to the zarr store being written to
+            zarr_path: Path to the zarr store being written to (for single/6d structures)
             channels: Channel names, e.g. ["DAPI", "GFP", "RFP"]
             num_z: Number of z-levels
             fov_labels: FOV labels, e.g. ["A1:0", "A1:1", "A2:0"]
             height: Image height in pixels
             width: Image width in pixels
+            fov_paths: Optional list of zarr paths, one per FOV (for per_fov/hcs structures).
+                       If provided, zarr_path is ignored and each FOV loads from its own store.
         """
         import zarr
 
@@ -2013,8 +2029,9 @@ class LightweightViewer(QWidget):
             self._zarr_debounce_timer.stop()
         self._zarr_load_pending = False
 
-        # Close any existing zarr store
+        # Close any existing zarr stores
         self._zarr_acquisition_store = None
+        self._zarr_fov_stores.clear()
 
         # Clear previous state
         self._plane_cache.clear()
@@ -2026,7 +2043,14 @@ class LightweightViewer(QWidget):
         self._image_height = height
         self._image_width = width
         self._fov_labels = list(fov_labels)
-        self._zarr_acquisition_path = Path(zarr_path)
+
+        # Handle per-FOV paths (for per_fov and hcs structures)
+        if fov_paths:
+            self._zarr_fov_paths = [Path(p) for p in fov_paths]
+            self._zarr_acquisition_path = None  # Not used in per-FOV mode
+        else:
+            self._zarr_fov_paths = []
+            self._zarr_acquisition_path = Path(zarr_path)
 
         # Build channel name to index map
         self._zarr_channel_map = {name: i for i, name in enumerate(self._channel_names)}
@@ -2037,12 +2061,16 @@ class LightweightViewer(QWidget):
             for i, c in enumerate(self._channel_names)
         }
 
-        # Try to open zarr store (may not exist yet during acquisition start)
-        try:
-            self._zarr_acquisition_store = zarr.open(str(zarr_path), mode="r")
-        except Exception as e:
-            logger.debug("Zarr store not yet available: %s", e)
-            self._zarr_acquisition_store = None
+        # Try to open zarr store(s) (may not exist yet during acquisition start)
+        if self._zarr_fov_paths:
+            # Per-FOV mode: stores are opened lazily in _load_zarr_plane
+            pass
+        else:
+            try:
+                self._zarr_acquisition_store = zarr.open(str(zarr_path), mode="r")
+            except Exception as e:
+                logger.debug("Zarr store not yet available: %s", e)
+                self._zarr_acquisition_store = None
 
         # Reset navigation state
         self._current_fov_idx = 0
@@ -2068,6 +2096,9 @@ class LightweightViewer(QWidget):
 
         # Rebuild NDV viewer with channel configuration
         self._rebuild_viewer_for_acquisition()
+
+        # Show/hide FOV slider based on number of FOVs
+        self._update_fov_slider_visibility()
 
         logger.info(
             f"NDViewer: Started zarr acquisition with {len(channels)} channels, "
@@ -2176,6 +2207,8 @@ class LightweightViewer(QWidget):
         Returns:
             Image plane as numpy array, or zeros if not available.
         """
+        import zarr
+
         cache_key = ("zarr", t, fov_idx, z, channel_idx)
 
         # Check cache first
@@ -2183,25 +2216,52 @@ class LightweightViewer(QWidget):
         if cached_plane is not None:
             return cached_plane
 
-        # Try to open/reopen zarr store if needed
-        if self._zarr_acquisition_store is None and self._zarr_acquisition_path:
-            import zarr
+        # Determine which store to use based on mode
+        store = None
+        use_fov_in_index = False  # Whether array has FOV dimension
 
-            try:
-                self._zarr_acquisition_store = zarr.open(
-                    str(self._zarr_acquisition_path), mode="r"
-                )
-            except Exception as e:
-                logger.debug("Could not open zarr store: %s", e)
+        if self._zarr_fov_paths:
+            # Per-FOV mode: each FOV has its own store
+            if fov_idx >= len(self._zarr_fov_paths):
+                logger.debug(f"FOV index {fov_idx} out of range")
                 return np.zeros(
                     (self._image_height, self._image_width), dtype=np.uint16
                 )
 
-        if self._zarr_acquisition_store is None:
+            # Get or open the store for this FOV
+            if fov_idx not in self._zarr_fov_stores:
+                try:
+                    self._zarr_fov_stores[fov_idx] = zarr.open(
+                        str(self._zarr_fov_paths[fov_idx]), mode="r"
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not open zarr store for FOV {fov_idx}: {e}")
+                    return np.zeros(
+                        (self._image_height, self._image_width), dtype=np.uint16
+                    )
+
+            store = self._zarr_fov_stores[fov_idx]
+            use_fov_in_index = False  # Per-FOV stores don't have FOV dimension
+
+        else:
+            # Single-store mode (single/6d structures)
+            if self._zarr_acquisition_store is None and self._zarr_acquisition_path:
+                try:
+                    self._zarr_acquisition_store = zarr.open(
+                        str(self._zarr_acquisition_path), mode="r"
+                    )
+                except Exception as e:
+                    logger.debug("Could not open zarr store: %s", e)
+                    return np.zeros(
+                        (self._image_height, self._image_width), dtype=np.uint16
+                    )
+
+            store = self._zarr_acquisition_store
+
+        if store is None:
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            store = self._zarr_acquisition_store
             # Get data array (level 0 for highest resolution)
             if "0" in store:
                 arr = store["0"]
@@ -2215,7 +2275,7 @@ class LightweightViewer(QWidget):
                 # (T, FOV, C, Z, Y, X)
                 plane = arr[t, fov_idx, channel_idx, z, :, :]
             elif ndim == 5:
-                # (T, C, Z, Y, X) - single FOV
+                # (T, C, Z, Y, X) - single FOV or per-FOV store
                 plane = arr[t, channel_idx, z, :, :]
             elif ndim == 4:
                 # (C, Z, Y, X) - single timepoint
@@ -2283,7 +2343,11 @@ class LightweightViewer(QWidget):
 
     def is_zarr_push_mode_active(self) -> bool:
         """Check if zarr push-based mode is active."""
-        return self._zarr_acquisition_active or self._zarr_acquisition_path is not None
+        return (
+            self._zarr_acquisition_active
+            or self._zarr_acquisition_path is not None
+            or bool(self._zarr_fov_paths)
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Legacy live refresh (kept for existing dataset viewing)

@@ -186,6 +186,8 @@ class ZarrAcquisitionSimulator:
         # Current position in acquisition
         self.current_t = 0
         self.current_fov = 0
+        self.current_z = 0
+        self.current_c = 0
 
         # Precompute base image pattern
         y = np.arange(height, dtype=np.uint16)[:, None]
@@ -197,9 +199,9 @@ class ZarrAcquisitionSimulator:
         self.fov_paths = []  # For per_fov and hcs structures
         self._setup_fov_structure()
 
-        # Timer for periodic writes
+        # Timer for periodic writes (one plane at a time)
         self.timer = QTimer()
-        self.timer.timeout.connect(self._write_next_fov)
+        self.timer.timeout.connect(self._write_next_plane)
 
         # Zarr store handles
         self.zarr_stores = {}  # fov_idx -> zarr store
@@ -350,77 +352,87 @@ class ZarrAcquisitionSimulator:
         # Create zarr stores
         self._create_zarr_stores()
 
-        # Determine zarr path for viewer
-        if self.structure == "single":
-            viewer_zarr_path = str(self.fov_paths[0])
-        elif self.structure == "6d":
-            viewer_zarr_path = str(self.fov_paths[0])
+        # Determine zarr path(s) for viewer
+        if self.structure in ("per_fov", "hcs"):
+            # Per-FOV mode: pass list of paths
+            self.viewer.start_zarr_acquisition(
+                zarr_path="",  # Not used in per-FOV mode
+                channels=self.channels,
+                num_z=self.n_z,
+                fov_labels=self.fov_labels,
+                height=self.height,
+                width=self.width,
+                fov_paths=[str(p) for p in self.fov_paths],
+            )
         else:
-            # For per_fov and hcs, use the first FOV path for now
-            # The viewer will discover all FOVs from the structure
-            viewer_zarr_path = str(self.fov_paths[0])
-
-        # Configure viewer via push-based zarr API
-        self.viewer.start_zarr_acquisition(
-            zarr_path=viewer_zarr_path,
-            channels=self.channels,
-            num_z=self.n_z,
-            fov_labels=self.fov_labels,
-            height=self.height,
-            width=self.width,
-        )
+            # Single store mode (single/6d)
+            self.viewer.start_zarr_acquisition(
+                zarr_path=str(self.fov_paths[0]),
+                channels=self.channels,
+                num_z=self.n_z,
+                fov_labels=self.fov_labels,
+                height=self.height,
+                width=self.width,
+            )
 
         # Start writing
         self.timer.start(self.interval_ms)
 
-    def _write_next_fov(self):
-        """Write all z-planes and channels for current FOV, then advance."""
+    def _write_next_plane(self):
+        """Write a single plane, then advance to next position."""
         if self.current_t >= self.n_t:
             self._finish()
             return
 
         t = self.current_t
         fov = self.current_fov
+        z = self.current_z
+        c = self.current_c
+        ch_name = self.channels[c]
         fov_label = self.fov_labels[fov]
 
-        for z in range(self.n_z):
-            for c, ch_name in enumerate(self.channels):
-                # Create image with identifying pattern
-                offset = np.uint16(t * 97 + fov * 11 + c * 301 + z * 50)
-                img = (self.base + offset).astype(np.uint16, copy=True)
+        # Create image with identifying pattern
+        offset = np.uint16(t * 97 + fov * 11 + c * 301 + z * 50)
+        img = (self.base + offset).astype(np.uint16, copy=True)
 
-                # Overlay text label
-                label = f"T={t:02d} F={fov} Z={z:02d} C={c}"
-                _draw_text(img, label, x=20, y=20, scale=10, value=60000)
+        # Overlay text label
+        label = f"T={t:02d} F={fov} Z={z:02d} C={c}"
+        _draw_text(img, label, x=20, y=20, scale=10, value=60000)
 
-                # Write to appropriate zarr array based on structure
-                if self.structure == "single":
-                    # (T, C, Z, Y, X)
-                    self.zarr_arrays[0][t, c, z, :, :] = img
-                elif self.structure == "6d":
-                    # (T, FOV, C, Z, Y, X)
-                    self.zarr_arrays[0][t, fov, c, z, :, :] = img
-                else:
-                    # per_fov or hcs: each FOV has its own array (T, C, Z, Y, X)
-                    self.zarr_arrays[fov][t, c, z, :, :] = img
+        # Write to appropriate zarr array based on structure
+        if self.structure == "single":
+            # (T, C, Z, Y, X)
+            self.zarr_arrays[0][t, c, z, :, :] = img
+        elif self.structure == "6d":
+            # (T, FOV, C, Z, Y, X)
+            self.zarr_arrays[0][t, fov, c, z, :, :] = img
+        else:
+            # per_fov or hcs: each FOV has its own array (T, C, Z, Y, X)
+            self.zarr_arrays[fov][t, c, z, :, :] = img
 
-                # Notify viewer (push-based zarr API)
-                self.viewer.notify_zarr_frame(
-                    t=t,
-                    fov_idx=fov,
-                    z=z,
-                    channel=ch_name,
-                )
-
-        print(
-            f"[t={t}] Wrote FOV {fov} ({fov_label}): {self.n_z} z x {len(self.channels)} ch"
+        # Notify viewer (push-based zarr API)
+        self.viewer.notify_zarr_frame(
+            t=t,
+            fov_idx=fov,
+            z=z,
+            channel=ch_name,
         )
 
-        # Advance to next FOV
-        self.current_fov += 1
-        if self.current_fov >= self.n_fov:
-            self.current_fov = 0
-            self.current_t += 1
+        print(
+            f"[t={t}] FOV {fov} ({fov_label}) z={z} ch={ch_name}"
+        )
+
+        # Advance to next plane: cycle through channels, then z, then FOV, then time
+        self.current_c += 1
+        if self.current_c >= len(self.channels):
+            self.current_c = 0
+            self.current_z += 1
+            if self.current_z >= self.n_z:
+                self.current_z = 0
+                self.current_fov += 1
+                if self.current_fov >= self.n_fov:
+                    self.current_fov = 0
+                    self.current_t += 1
 
     def _finish(self):
         """Called when acquisition is complete."""
@@ -484,8 +496,8 @@ Examples:
     ap.add_argument(
         "--interval",
         type=float,
-        default=0.1,
-        help="Seconds between FOV writes (default: 0.1).",
+        default=0.5,
+        help="Seconds between plane writes (default: 0.5).",
     )
     ap.add_argument(
         "--n-fov",
