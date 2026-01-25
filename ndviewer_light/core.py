@@ -1471,7 +1471,7 @@ class LightweightViewer(QWidget):
             finally:
                 self._updating_sliders = False
 
-            self._load_current_fov()
+            self._load_current_position()
 
     def _on_fov_slider_changed(self, value: int):
         """Handle FOV slider change."""
@@ -1484,6 +1484,16 @@ class LightweightViewer(QWidget):
                 self._fov_label.setText(f"FOV: {self._fov_labels[value]}")
             else:
                 self._fov_label.setText(f"FOV: {value}")
+            self._load_current_position()
+
+    def _load_current_position(self):
+        """Load data for current position, dispatching to appropriate loader.
+
+        Routes to zarr loader if zarr acquisition is active, otherwise to TIFF loader.
+        """
+        if self._zarr_acquisition_active or self._zarr_acquisition_path is not None:
+            self._load_current_zarr_fov()
+        else:
             self._load_current_fov()
 
     def _on_time_play_clicked(self, checked: bool):
@@ -1780,7 +1790,7 @@ class LightweightViewer(QWidget):
         finally:
             self._updating_sliders = False
 
-        self._load_current_fov()
+        self._load_current_position()
 
     def go_to_well_fov(self, well_id: str, fov_index: int) -> bool:
         """Navigate to a specific well and FOV (push-based API).
