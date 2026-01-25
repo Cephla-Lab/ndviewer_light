@@ -2259,6 +2259,9 @@ class LightweightViewer(QWidget):
         ):
             for fov_in_region in range(n_fov):
                 self._fov_labels.append(f"{region_label}:{fov_in_region}")
+        logger.info(
+            f"6D regions mode: labels={self._fov_labels[:5]}..., paths={len(self._zarr_region_paths)}, fovs_per_region={self._fovs_per_region}, offsets={self._region_fov_offsets}"
+        )
 
         # Build channel name to index map
         self._zarr_channel_map = {name: i for i, name in enumerate(self._channel_names)}
@@ -2474,6 +2477,9 @@ class LightweightViewer(QWidget):
             # Get or open the store for this region (lazy loading)
             if region_idx not in self._zarr_region_stores:
                 try:
+                    logger.debug(
+                        f"Opening zarr store for region {region_idx}: {self._zarr_region_paths[region_idx]}"
+                    )
                     self._zarr_region_stores[region_idx] = zarr.open(
                         str(self._zarr_region_paths[region_idx]), mode="r"
                     )
@@ -2504,7 +2510,10 @@ class LightweightViewer(QWidget):
                 # Index 6D: (FOV, T, C, Z, Y, X) → arr[fov, t, c, z, :, :]
                 plane = arr[local_fov_idx, t, channel_idx, z, :, :]
                 plane = np.asarray(plane)
-                self._plane_cache.put(cache_key, plane)
+                # Only cache if plane has data (non-zero max indicates written data)
+                # This prevents caching empty planes during live acquisition
+                if plane.max() > 0:
+                    self._plane_cache.put(cache_key, plane)
                 return plane
             except (IndexError, KeyError) as e:
                 logger.debug(
@@ -2601,7 +2610,10 @@ class LightweightViewer(QWidget):
                 )
 
             plane = np.asarray(plane)
-            self._plane_cache.put(cache_key, plane)
+            # Only cache if plane has data (non-zero max indicates written data)
+            # This prevents caching empty planes during live acquisition
+            if plane.max() > 0:
+                self._plane_cache.put(cache_key, plane)
             return plane
 
         except (IndexError, KeyError) as e:

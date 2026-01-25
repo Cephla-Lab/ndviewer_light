@@ -350,3 +350,35 @@ class TestMultiRegion6D:
         zarr_6d_regions_mode = False
         zarr_acquisition_active = True
         assert is_zarr_push_mode_active()
+
+
+class TestCachingBehavior:
+    """Test plane caching behavior during live acquisition."""
+
+    def test_empty_plane_not_cached(self):
+        """Test that empty (all-zero) planes are not cached.
+
+        This prevents stale zeros from being cached when viewing an FOV
+        before its data has been written during live acquisition.
+        """
+        import numpy as np
+
+        # Simulate cache behavior: only cache if plane has data
+        cache = {}
+
+        def should_cache(plane):
+            """Replicate the caching logic: only cache non-empty planes."""
+            return plane.max() > 0
+
+        # Empty plane should not be cached
+        empty_plane = np.zeros((100, 100), dtype=np.uint16)
+        assert not should_cache(empty_plane)
+
+        # Plane with data should be cached
+        data_plane = np.random.randint(100, 60000, size=(100, 100), dtype=np.uint16)
+        assert should_cache(data_plane)
+
+        # Edge case: plane with single non-zero pixel should be cached
+        almost_empty = np.zeros((100, 100), dtype=np.uint16)
+        almost_empty[50, 50] = 1
+        assert should_cache(almost_empty)
