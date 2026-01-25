@@ -77,14 +77,7 @@ SliderLabel { font-size: 10px; }
 if TYPE_CHECKING:
     import xarray as xr
 
-# Try to import tensorstore for zarr v3 support
-try:
-    import tensorstore as ts
-
-    TENSORSTORE_AVAILABLE = True
-except ImportError:
-    ts = None
-    TENSORSTORE_AVAILABLE = False
+import tensorstore as ts
 
 # Constants
 TIFF_EXTENSIONS = {".tif", ".tiff"}
@@ -910,9 +903,6 @@ def open_zarr_tensorstore(path: Path, array_path: str = "0") -> Optional[Any]:
     Returns:
         TensorStore array object, or None if failed
     """
-    if not TENSORSTORE_AVAILABLE:
-        return None
-
     version = detect_zarr_version(path)
     if version is None:
         logger.warning(f"Could not detect zarr version for {path}")

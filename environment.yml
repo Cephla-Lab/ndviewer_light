@@ -13,3 +13,6 @@ dependencies:
   - vispy
   - zarr
   - ndv
+  - pip
+  - pip:
+    - tensorstore
