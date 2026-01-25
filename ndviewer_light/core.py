@@ -820,31 +820,33 @@ def detect_format(base_path: Path) -> str:
     """Detect dataset format: zarr_v3, ome_tiff, or single_tiff.
 
     Zarr v3 is detected by:
-    - plate.zarr directory (HCS format)
-    - zarr/ directory with .zarr subdirectories
-    - base_path itself being a .zarr directory with zarr.json or .zattrs
+    - plate.zarr or plate.ome.zarr directory (HCS format)
+    - zarr/ directory with .zarr or .ome.zarr subdirectories
+    - base_path itself being a .zarr/.ome.zarr directory with zarr.json or .zattrs
 
     OME-TIFF is detected by .ome.tif* files.
     Falls back to single_tiff if neither is detected.
     """
     # Check for zarr v3 formats
-    # 1. HCS plate format: plate.zarr/
-    if (base_path / "plate.zarr").exists():
+    # 1. HCS plate format: plate.zarr/ or plate.ome.zarr/
+    if (base_path / "plate.zarr").exists() or (base_path / "plate.ome.zarr").exists():
         return "zarr_v3"
 
-    # 2. Non-HCS: zarr/ directory with .zarr subdirs
+    # 2. Non-HCS: zarr/ directory with .zarr or .ome.zarr subdirs
     zarr_dir = base_path / "zarr"
     if zarr_dir.exists():
         for region_dir in zarr_dir.iterdir():
             if region_dir.is_dir() and not region_dir.name.startswith("."):
-                # Check for acquisition.zarr or fov_*.zarr
+                # Check for acquisition.zarr or fov_*.zarr (old format)
                 if (region_dir / "acquisition.zarr").exists():
                     return "zarr_v3"
-                if any(d.suffix == ".zarr" for d in region_dir.iterdir() if d.is_dir()):
-                    return "zarr_v3"
+                # Check for .zarr or .ome.zarr subdirectories
+                for d in region_dir.iterdir():
+                    if d.is_dir() and (d.suffix == ".zarr" or d.name.endswith(".ome.zarr")):
+                        return "zarr_v3"
 
-    # 3. Direct .zarr directory
-    if base_path.suffix == ".zarr":
+    # 3. Direct .zarr or .ome.zarr directory
+    if base_path.suffix == ".zarr" or base_path.name.endswith(".ome.zarr"):
         if (base_path / "zarr.json").exists() or (base_path / ".zattrs").exists():
             return "zarr_v3"
 
@@ -928,13 +930,17 @@ def hex_to_colormap(hex_color: str) -> str:
 
 
 def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
-    """Parse OME-NGFF metadata from zarr v3 .zattrs file.
+    """Parse OME-NGFF metadata from zarr v3 store.
+
+    Supports both old and new Squid zarr formats:
+    - Old format: .zattrs file with multiscales/omero/_squid_metadata at root
+    - New format (PR #474): zarr.json with attributes.ome.multiscales/omero and attributes._squid
 
     Extracts metadata from zarr v3 stores created by Squid:
     - multiscales[0].axes: axis order and names
     - multiscales[0].coordinateTransformations: physical pixel sizes
     - omero.channels: channel names and hex colors
-    - _squid_metadata: Squid-specific metadata (physical sizes, acquisition_complete)
+    - _squid/_squid_metadata: Squid-specific metadata (physical sizes, acquisition_complete)
 
     Args:
         zarr_path: Path to a .zarr directory
@@ -957,19 +963,33 @@ def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
         "acquisition_complete": False,
     }
 
+    # Try to read metadata from zarr.json first (new format), then .zattrs (old format)
+    attrs = None
+    zarr_json_path = zarr_path / "zarr.json"
     zattrs_path = zarr_path / ".zattrs"
-    if not zattrs_path.exists():
+
+    if zarr_json_path.exists():
+        try:
+            with open(zarr_json_path, "r") as f:
+                zarr_json = json.load(f)
+            # New format: metadata is in zarr.json -> attributes
+            attrs = zarr_json.get("attributes", {})
+        except Exception as e:
+            logger.debug("Failed to read zarr.json: %s", e)
+
+    if not attrs and zattrs_path.exists():
+        try:
+            with open(zattrs_path, "r") as f:
+                attrs = json.load(f)
+        except Exception as e:
+            logger.debug("Failed to read .zattrs: %s", e)
+
+    if not attrs:
         return result
 
-    try:
-        with open(zattrs_path, "r") as f:
-            attrs = json.load(f)
-    except Exception as e:
-        logger.debug("Failed to read .zattrs: %s", e)
-        return result
-
-    # Extract multiscales metadata (OME-NGFF format)
-    multiscales = attrs.get("multiscales", [])
+    # Handle both old format (multiscales at root) and new format (ome.multiscales)
+    ome = attrs.get("ome", {})
+    multiscales = ome.get("multiscales") or attrs.get("multiscales", [])
     if multiscales and isinstance(multiscales, list):
         ms = multiscales[0]
         result["axes"] = ms.get("axes", [])
@@ -1007,8 +1027,8 @@ def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
                             result["dz_um"] = scale_val
                 break  # Only use first scale transform
 
-    # Extract omero channel metadata
-    omero = attrs.get("omero", {})
+    # Handle both old format (omero at root) and new format (ome.omero)
+    omero = ome.get("omero") or attrs.get("omero", {})
     channels = omero.get("channels", [])
     for ch in channels:
         name = ch.get("label") or ch.get("name") or ""
@@ -1019,8 +1039,8 @@ def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
             color = f"{color:06X}"
         result["channel_colors"].append(color)
 
-    # Extract Squid-specific metadata (overrides OME-NGFF if present)
-    squid_meta = attrs.get("_squid_metadata", {})
+    # Handle both old format (_squid_metadata) and new format (_squid)
+    squid_meta = attrs.get("_squid") or attrs.get("_squid_metadata", {})
     if squid_meta:
         if "pixel_size_um" in squid_meta:
             result["pixel_size_um"] = squid_meta["pixel_size_um"]
@@ -1034,10 +1054,17 @@ def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
 def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
     """Discover zarr v3 FOV stores within a dataset directory.
 
-    Scans for three possible zarr v3 structures created by Squid:
-    1. HCS plate: plate.zarr/row/col/field/time/acquisition.zarr
+    Scans for zarr v3 structures created by Squid (both old and new formats):
+
+    Old format:
+    1. HCS plate: plate.zarr/row/col/field/acquisition.zarr
     2. Non-HCS per-FOV: zarr/region/fov_N.zarr
-    3. Non-HCS 6D: zarr/region/acquisition.zarr (single store with FOV dimension)
+    3. Non-HCS 6D: zarr/region/acquisition.zarr
+
+    New format (PR #474):
+    1. HCS plate: plate.ome.zarr/{row}/{col}/{fov}/0 (5D per FOV)
+    2. Non-HCS per-FOV: zarr/{region}/fov_{n}.ome.zarr (5D per FOV)
+    3. Non-HCS 6D: zarr/{region}/acquisition.zarr (6D with FOV dimension)
 
     Args:
         base_path: Dataset root directory
@@ -1049,9 +1076,14 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
     """
     fovs = []
 
-    # Check for HCS plate structure: plate.zarr/
-    plate_zarr = base_path / "plate.zarr"
-    if plate_zarr.exists():
+    # Check for HCS plate structure: plate.zarr/ or plate.ome.zarr/
+    plate_zarr = None
+    if (base_path / "plate.ome.zarr").exists():
+        plate_zarr = base_path / "plate.ome.zarr"
+    elif (base_path / "plate.zarr").exists():
+        plate_zarr = base_path / "plate.zarr"
+
+    if plate_zarr:
         # Scan row/col/field structure
         for row_dir in sorted(plate_zarr.iterdir()):
             if not row_dir.is_dir() or row_dir.name.startswith("."):
@@ -1065,31 +1097,42 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
                     if not field_dir.is_dir() or not field_dir.name.isdigit():
                         continue
                     field_idx = int(field_dir.name)
-                    # Look for acquisition.zarr inside field or field/time structure
+
+                    # New format: {fov}/0 where "0" is the zarr array path
+                    array_path = field_dir / "0"
+                    if array_path.exists():
+                        # The zarr store is the field_dir itself (contains zarr.json and 0/)
+                        fovs.append(
+                            {"region": well_id, "fov": field_idx, "path": field_dir}
+                        )
+                        continue
+
+                    # Old format: field/acquisition.zarr
                     acq_zarr = field_dir / "acquisition.zarr"
                     if acq_zarr.exists():
                         fovs.append(
                             {"region": well_id, "fov": field_idx, "path": acq_zarr}
                         )
-                    else:
-                        # Check for time/acquisition.zarr structure
-                        for time_dir in sorted(field_dir.iterdir()):
-                            if not time_dir.is_dir() or not time_dir.name.isdigit():
-                                continue
-                            acq_zarr = time_dir / "acquisition.zarr"
-                            if acq_zarr.exists():
-                                fovs.append(
-                                    {
-                                        "region": well_id,
-                                        "fov": field_idx,
-                                        "path": acq_zarr,
-                                    }
-                                )
-                                break  # Use first timepoint's zarr
+                        continue
+
+                    # Old format: field/time/acquisition.zarr
+                    for time_dir in sorted(field_dir.iterdir()):
+                        if not time_dir.is_dir() or not time_dir.name.isdigit():
+                            continue
+                        acq_zarr = time_dir / "acquisition.zarr"
+                        if acq_zarr.exists():
+                            fovs.append(
+                                {
+                                    "region": well_id,
+                                    "fov": field_idx,
+                                    "path": acq_zarr,
+                                }
+                            )
+                            break  # Use first timepoint's zarr
         if fovs:
             return fovs, "hcs_plate"
 
-    # Check for non-HCS per-FOV: zarr/region/fov_N.zarr
+    # Check for non-HCS per-FOV: zarr/region/fov_N.zarr or zarr/region/fov_N.ome.zarr
     zarr_dir = base_path / "zarr"
     if zarr_dir.exists():
         for region_dir in sorted(zarr_dir.iterdir()):
@@ -1104,8 +1147,8 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
                 fovs.append({"region": region_name, "fov": 0, "path": acq_zarr})
                 return fovs, "6d_single"
 
-            # Look for fov_N.zarr files
-            fov_pattern = re.compile(r"fov_(\d+)\.zarr")
+            # Look for fov_N.zarr or fov_N.ome.zarr files
+            fov_pattern = re.compile(r"fov_(\d+)(?:\.ome)?\.zarr")
             for fov_dir in sorted(region_dir.iterdir()):
                 if not fov_dir.is_dir():
                     continue
@@ -1118,8 +1161,8 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
         if fovs:
             return fovs, "per_fov"
 
-    # Check if base_path itself is a .zarr directory
-    if base_path.suffix == ".zarr":
+    # Check if base_path itself is a .zarr or .ome.zarr directory
+    if base_path.suffix == ".zarr" or base_path.name.endswith(".ome.zarr"):
         zarr_json = base_path / "zarr.json"
         zattrs = base_path / ".zattrs"
         if zarr_json.exists() or zattrs.exists():
@@ -2434,13 +2477,21 @@ class LightweightViewer(QWidget):
 
             # Get first zarr path to check metadata
             first_path = fovs[0]["path"]
+            # Check both zarr.json (new format) and .zattrs (old format)
+            zarr_json_path = first_path / "zarr.json"
             zattrs_path = first_path / ".zattrs"
 
             mtime_ns = 0
             acquisition_complete = False
-            if zattrs_path.exists():
+            metadata_path = None
+            if zarr_json_path.exists():
+                metadata_path = zarr_json_path
+            elif zattrs_path.exists():
+                metadata_path = zattrs_path
+
+            if metadata_path:
                 try:
-                    st = zattrs_path.stat()
+                    st = metadata_path.stat()
                     mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
                     meta = parse_zarr_v3_metadata(first_path)
                     acquisition_complete = meta.get("acquisition_complete", False)

@@ -375,3 +375,137 @@ class TestHexToColormap:
         assert hex_to_colormap("not-hex") == "gray"
         assert hex_to_colormap("#12") == "gray"  # Too short
         assert hex_to_colormap("#GGGGGG") == "gray"  # Invalid chars
+
+
+class TestNewSquidFormat:
+    """Test suite for new Squid zarr format (PR #474)."""
+
+    def test_detect_plate_ome_zarr(self):
+        """Test detection of plate.ome.zarr (new HCS format)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            plate_zarr = base / "plate.ome.zarr"
+            plate_zarr.mkdir()
+            (plate_zarr / "zarr.json").write_text('{"zarr_format": 3}')
+
+            assert detect_format(base) == "zarr_v3"
+
+    def test_detect_fov_ome_zarr(self):
+        """Test detection of fov_N.ome.zarr (new per-FOV format)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            zarr_dir = base / "zarr" / "region_1"
+            zarr_dir.mkdir(parents=True)
+            fov_zarr = zarr_dir / "fov_0.ome.zarr"
+            fov_zarr.mkdir()
+            (fov_zarr / "zarr.json").write_text('{"zarr_format": 3}')
+
+            assert detect_format(base) == "zarr_v3"
+
+    def test_parse_metadata_from_zarr_json(self):
+        """Test parsing metadata from zarr.json attributes (new format)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zarr_path = Path(tmpdir)
+            zarr_json = {
+                "zarr_format": 3,
+                "node_type": "array",
+                "attributes": {
+                    "ome": {
+                        "multiscales": [
+                            {
+                                "axes": [
+                                    {"name": "t", "type": "time"},
+                                    {"name": "c", "type": "channel"},
+                                    {"name": "z", "type": "space", "unit": "micrometer"},
+                                    {"name": "y", "type": "space", "unit": "micrometer"},
+                                    {"name": "x", "type": "space", "unit": "micrometer"},
+                                ],
+                                "datasets": [
+                                    {
+                                        "path": "0",
+                                        "coordinateTransformations": [
+                                            {"type": "scale", "scale": [1, 1, 2.0, 0.325, 0.325]}
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                        "omero": {
+                            "channels": [
+                                {"label": "DAPI", "color": "0000FF"},
+                                {"label": "GFP", "color": "00FF00"},
+                            ]
+                        },
+                    },
+                    "_squid": {
+                        "pixel_size_um": 0.5,
+                        "z_step_um": 1.5,
+                        "acquisition_complete": True,
+                    },
+                },
+            }
+            (zarr_path / "zarr.json").write_text(json.dumps(zarr_json))
+
+            meta = parse_zarr_v3_metadata(zarr_path)
+
+            assert meta["channel_names"] == ["DAPI", "GFP"]
+            assert meta["channel_colors"] == ["0000FF", "00FF00"]
+            assert meta["pixel_size_um"] == pytest.approx(0.5)
+            assert meta["dz_um"] == pytest.approx(1.5)
+            assert meta["acquisition_complete"] is True
+
+    def test_discover_new_hcs_structure(self):
+        """Test FOV discovery for new HCS plate.ome.zarr/{row}/{col}/{fov}/0 structure."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            # Create plate.ome.zarr/A/1/0/0 (row/col/fov/array)
+            for row in ["A", "B"]:
+                for col in ["1", "2"]:
+                    for fov in ["0", "1"]:
+                        fov_path = base / "plate.ome.zarr" / row / col / fov
+                        fov_path.mkdir(parents=True)
+                        # Create "0" array directory (new format indicator)
+                        (fov_path / "0").mkdir()
+                        (fov_path / "zarr.json").write_text('{"zarr_format": 3}')
+
+            fovs, structure_type = discover_zarr_v3_fovs(base)
+
+            assert structure_type == "hcs_plate"
+            assert len(fovs) == 8  # 2 rows * 2 cols * 2 fovs
+            assert fovs[0]["region"] == "A1"
+            assert fovs[0]["fov"] == 0
+
+    def test_discover_new_per_fov_structure(self):
+        """Test FOV discovery for new zarr/region/fov_N.ome.zarr structure."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            region_dir = base / "zarr" / "region_1"
+            region_dir.mkdir(parents=True)
+            for fov_idx in range(3):
+                fov_zarr = region_dir / f"fov_{fov_idx}.ome.zarr"
+                fov_zarr.mkdir()
+                (fov_zarr / "zarr.json").write_text('{"zarr_format": 3}')
+
+            fovs, structure_type = discover_zarr_v3_fovs(base)
+
+            assert structure_type == "per_fov"
+            assert len(fovs) == 3
+            assert fovs[0]["region"] == "region_1"
+            assert fovs[0]["fov"] == 0
+
+    def test_metadata_fallback_to_zattrs(self):
+        """Test that metadata parsing falls back to .zattrs if zarr.json has no attributes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zarr_path = Path(tmpdir)
+            # zarr.json without attributes
+            (zarr_path / "zarr.json").write_text('{"zarr_format": 3}')
+            # .zattrs with metadata (old format)
+            zattrs = {
+                "multiscales": [{"axes": [{"name": "x", "type": "space"}]}],
+                "_squid_metadata": {"pixel_size_um": 0.325},
+            }
+            (zarr_path / ".zattrs").write_text(json.dumps(zattrs))
+
+            meta = parse_zarr_v3_metadata(zarr_path)
+
+            assert meta["pixel_size_um"] == pytest.approx(0.325)
