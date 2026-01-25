@@ -3390,8 +3390,7 @@ class LightweightViewer(QWidget):
         n_fov = get_dim("fov")
         n_c = get_dim("c")
         n_z = get_dim("z")
-        n_y = get_dim("y", shape[-2])
-        n_x = get_dim("x", shape[-1])
+        # n_y and n_x not needed - shape comes from dask array directly
 
         # Build channel info
         channel_names = meta.get("channel_names", [])
