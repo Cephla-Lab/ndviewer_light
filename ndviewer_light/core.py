@@ -2748,6 +2748,7 @@ class LightweightViewer(QWidget):
         self._fovs_per_region = []
         self._region_fov_offsets = []
         self._zarr_6d_regions_mode = False
+        self._zarr_written_planes.clear()
         self._close_open_handles()
         super().closeEvent(event)
 
