@@ -100,6 +100,51 @@ chunks = (1, 1, 1, height, width)
 
 The actual pixel data only enters memory when displayed.
 
+## Plane Cache
+
+The viewer maintains an application-level LRU cache (`MemoryBoundedLRUCache`) for loaded planes. This cache is necessary because no other layer provides caching:
+
+```
+User slider → NDV → Dask → _load_zarr_plane() → Tensorstore → Disk
+                                  ↑
+                           CACHE IS HERE
+```
+
+- **NDV**: No caching (passes through to dask)
+- **Dask**: No caching (lazy arrays recompute on each `.compute()`)
+- **Tensorstore**: Minimal internal caching
+- **OS page cache**: Helps but still has syscall overhead
+
+### Performance Impact
+
+Benchmarks with 1024x1024 uint16 planes:
+
+| Interaction Pattern | Without Cache | With Cache | Speedup |
+|---------------------|---------------|------------|---------|
+| Z-stack back-and-forth | 86 ms | 13 ms | **6.5x** |
+| Channel switching | 36 ms | 2 ms | **18.7x** |
+| Time scrubbing | 21 ms | 10 ms | **2.2x** |
+
+Channel switching benefits most because users typically cycle through the same channels repeatedly.
+
+### Configuration
+
+- Default size: 500 MB
+- Holds ~250 planes at 1024x1024, or ~62 planes at 2048x2048
+- LRU eviction when limit is reached
+
+### Race Condition Handling
+
+During live acquisition, a race condition can occur:
+
+1. Viewer reads plane → gets zeros (data not yet flushed)
+2. During read, `notify_zarr_frame()` is called
+3. Read completes with stale zeros
+
+To prevent caching stale data:
+- Check `was_written_before_read` before caching
+- Call `cache.invalidate()` in `notify_zarr_frame()`
+
 ## Why Tensorstore Instead of Zarr-Python?
 
 1. **Zarr v3 support**: Tensorstore natively supports both zarr v2 and v3 formats with a unified API
