@@ -130,7 +130,8 @@ def _write_zarr_metadata(
                     "axes": axes,
                     "datasets": [
                         {
-                            "path": "0",
+                            # "." when array is at root (6D), "0" when at /0 subdirectory
+                            "path": "." if merge_into_existing else "0",
                             "coordinateTransformations": [
                                 {"type": "scale", "scale": scale}
                             ],
