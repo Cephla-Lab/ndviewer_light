@@ -2589,7 +2589,7 @@ class LightweightViewer(QWidget):
             except Exception as e:
                 logger.warning(
                     f"Failed to load zarr plane (region={region_idx}, fov={local_fov_idx}, "
-                    f"t={t}, z={z}, ch={channel_idx}): {e}"
+                    f"t={t}, z={z}, ch={channel_idx}): {type(e).__name__}: {e}"
                 )
                 return np.zeros(
                     (self._image_height, self._image_width), dtype=np.uint16
@@ -2642,7 +2642,8 @@ class LightweightViewer(QWidget):
         except Exception as e:
             # Unexpected errors - log with more visibility
             logger.warning(
-                f"Failed to load zarr plane (t={t}, fov={fov_idx}, z={z}, ch={channel_idx}): {e}"
+                f"Failed to load zarr plane (t={t}, fov={fov_idx}, z={z}, ch={channel_idx}): "
+                f"{type(e).__name__}: {e}"
             )
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 

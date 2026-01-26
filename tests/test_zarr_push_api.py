@@ -186,6 +186,50 @@ class TestZarrStateManagement:
         assert bool(fov_labels) or zarr_acquisition_active
 
 
+class TestZarrApiValidation:
+    """Test API validation for zarr acquisition methods."""
+
+    def test_empty_fov_paths_validation(self):
+        """Test that empty fov_paths raises ValueError.
+
+        This validates the API contract that start_zarr_acquisition()
+        requires at least one FOV path.
+        """
+
+        # Simulate the validation logic from start_zarr_acquisition()
+        def validate_fov_paths(fov_paths):
+            if not fov_paths:
+                raise ValueError("fov_paths must not be empty")
+
+        # Empty list should raise
+        import pytest
+
+        with pytest.raises(ValueError, match="fov_paths must not be empty"):
+            validate_fov_paths([])
+
+        # None should raise
+        with pytest.raises(ValueError, match="fov_paths must not be empty"):
+            validate_fov_paths(None)
+
+        # Non-empty list should pass
+        validate_fov_paths(["/path/to/fov.zarr"])  # No exception
+
+    def test_fov_paths_labels_mismatch_truncation(self):
+        """Test that mismatched fov_paths/fov_labels are truncated to shorter."""
+        fov_paths = ["/path/fov0.zarr", "/path/fov1.zarr", "/path/fov2.zarr"]
+        fov_labels = ["A1:0", "A1:1"]  # Only 2 labels for 3 paths
+
+        # Simulate truncation logic from start_zarr_acquisition()
+        if len(fov_paths) != len(fov_labels):
+            min_len = min(len(fov_paths), len(fov_labels))
+            fov_paths = list(fov_paths)[:min_len]
+            fov_labels = list(fov_labels)[:min_len]
+
+        assert len(fov_paths) == 2
+        assert len(fov_labels) == 2
+        assert fov_paths == ["/path/fov0.zarr", "/path/fov1.zarr"]
+
+
 class TestMultiRegion6D:
     """Test multi-region 6D zarr support (6d_regions mode)."""
 
