@@ -546,3 +546,98 @@ class TestMemoryBoundedLRUCacheInvalidate:
             t.join()
 
         assert len(errors) == 0, f"Thread safety errors: {errors}"
+
+
+class TestWriteZarrMetadata:
+    """Tests for _write_zarr_metadata function in simulate_zarr_acquisition.py."""
+
+    def test_merge_into_existing_preserves_array_structure(self, tmp_path):
+        """Test that merge_into_existing=True preserves existing zarr.json structure."""
+        import json
+        import sys
+
+        # Import the function from simulate script
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from simulate_zarr_acquisition import _write_zarr_metadata
+
+        zarr_path = tmp_path / "test.zarr"
+        zarr_path.mkdir()
+
+        # Create an existing array zarr.json (simulating what tensorstore creates)
+        existing_zarr_json = {
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [4, 10, 3, 5, 512, 512],
+            "data_type": "uint16",
+            "chunk_grid": {
+                "name": "regular",
+                "configuration": {"chunk_shape": [1, 1, 1, 1, 512, 512]},
+            },
+            "chunk_key_encoding": {"name": "default"},
+            "fill_value": 0,
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+        }
+        with open(zarr_path / "zarr.json", "w") as f:
+            json.dump(existing_zarr_json, f)
+
+        # Call with merge_into_existing=True
+        _write_zarr_metadata(
+            zarr_path,
+            channels=["DAPI", "GFP", "RFP"],
+            channel_colors=["#0000FF", "#00FF00", "#FF0000"],
+            pixel_size_um=0.25,
+            z_step_um=1.0,
+            merge_into_existing=True,
+        )
+
+        # Read the result
+        with open(zarr_path / "zarr.json", "r") as f:
+            result = json.load(f)
+
+        # Should preserve array structure
+        assert result["zarr_format"] == 3
+        assert result["node_type"] == "array"
+        assert result["shape"] == [4, 10, 3, 5, 512, 512]
+        assert result["data_type"] == "uint16"
+
+        # Should have added attributes
+        assert "attributes" in result
+        assert "ome" in result["attributes"]
+        assert "multiscales" in result["attributes"]["ome"]
+
+        # Dataset path should be "." for merged (6D at root)
+        datasets = result["attributes"]["ome"]["multiscales"][0]["datasets"]
+        assert datasets[0]["path"] == "."
+
+    def test_non_merge_creates_group_structure(self, tmp_path):
+        """Test that merge_into_existing=False creates a group zarr.json."""
+        import json
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from simulate_zarr_acquisition import _write_zarr_metadata
+
+        zarr_path = tmp_path / "test.zarr"
+        zarr_path.mkdir()
+
+        # Call without merge (default behavior)
+        _write_zarr_metadata(
+            zarr_path,
+            channels=["DAPI", "GFP"],
+            channel_colors=["#0000FF", "#00FF00"],
+            pixel_size_um=0.25,
+            z_step_um=1.0,
+            merge_into_existing=False,
+        )
+
+        # Read the result
+        with open(zarr_path / "zarr.json", "r") as f:
+            result = json.load(f)
+
+        # Should be a group (not array)
+        assert result["zarr_format"] == 3
+        assert result["node_type"] == "group"
+
+        # Dataset path should be "0" for non-merged (array at /0 subdirectory)
+        datasets = result["attributes"]["ome"]["multiscales"][0]["datasets"]
+        assert datasets[0]["path"] == "0"

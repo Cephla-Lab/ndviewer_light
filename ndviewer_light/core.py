@@ -2506,15 +2506,19 @@ class LightweightViewer(QWidget):
         """Load a single plane from the zarr store using tensorstore.
 
         Uses tensorstore to support both zarr v2 and v3 formats.
+        Supports two modes:
+        - 6D regions mode: each region has a 6D array (FOV, T, C, Z, Y, X)
+        - Per-FOV mode: each FOV has a 5D array (T, C, Z, Y, X)
 
         Args:
             t: Timepoint index
-            fov_idx: FOV index
+            fov_idx: FOV index (global index, converted to region/local for 6D mode)
             z: Z-level index
             channel_idx: Channel index
 
         Returns:
-            Image plane as numpy array, or zeros if not available.
+            Image plane as numpy array, or zeros if data not available or
+            no zarr mode is configured.
         """
         cache_key = ("zarr", t, fov_idx, z, channel_idx)
 
