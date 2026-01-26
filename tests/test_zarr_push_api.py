@@ -186,6 +186,50 @@ class TestZarrStateManagement:
         assert bool(fov_labels) or zarr_acquisition_active
 
 
+class TestZarrApiValidation:
+    """Test API validation for zarr acquisition methods."""
+
+    def test_empty_fov_paths_validation(self):
+        """Test that empty fov_paths raises ValueError.
+
+        This validates the API contract that start_zarr_acquisition()
+        requires at least one FOV path.
+        """
+
+        # Simulate the validation logic from start_zarr_acquisition()
+        def validate_fov_paths(fov_paths):
+            if not fov_paths:
+                raise ValueError("fov_paths must not be empty")
+
+        # Empty list should raise
+        import pytest
+
+        with pytest.raises(ValueError, match="fov_paths must not be empty"):
+            validate_fov_paths([])
+
+        # None should raise
+        with pytest.raises(ValueError, match="fov_paths must not be empty"):
+            validate_fov_paths(None)
+
+        # Non-empty list should pass
+        validate_fov_paths(["/path/to/fov.zarr"])  # No exception
+
+    def test_fov_paths_labels_mismatch_truncation(self):
+        """Test that mismatched fov_paths/fov_labels are truncated to shorter."""
+        fov_paths = ["/path/fov0.zarr", "/path/fov1.zarr", "/path/fov2.zarr"]
+        fov_labels = ["A1:0", "A1:1"]  # Only 2 labels for 3 paths
+
+        # Simulate truncation logic from start_zarr_acquisition()
+        if len(fov_paths) != len(fov_labels):
+            min_len = min(len(fov_paths), len(fov_labels))
+            fov_paths = list(fov_paths)[:min_len]
+            fov_labels = list(fov_labels)[:min_len]
+
+        assert len(fov_paths) == 2
+        assert len(fov_labels) == 2
+        assert fov_paths == ["/path/fov0.zarr", "/path/fov1.zarr"]
+
+
 class TestMultiRegion6D:
     """Test multi-region 6D zarr support (6d_regions mode)."""
 
@@ -325,18 +369,14 @@ class TestMultiRegion6D:
 
     def test_6d_regions_push_mode_detection(self):
         """Test is_zarr_push_mode_active includes 6d_regions mode."""
-        # Simulate is_zarr_push_mode_active logic
+        # Simulate is_zarr_push_mode_active logic (matches core.py implementation)
         zarr_acquisition_active = False
-        zarr_acquisition_path = None
         zarr_fov_paths = []
         zarr_6d_regions_mode = False
 
         def is_zarr_push_mode_active():
             return (
-                zarr_acquisition_active
-                or zarr_acquisition_path is not None
-                or bool(zarr_fov_paths)
-                or zarr_6d_regions_mode
+                zarr_acquisition_active or bool(zarr_fov_paths) or zarr_6d_regions_mode
             )
 
         # None active
@@ -349,6 +389,11 @@ class TestMultiRegion6D:
         # Reset and check acquisition active
         zarr_6d_regions_mode = False
         zarr_acquisition_active = True
+        assert is_zarr_push_mode_active()
+
+        # Reset and check fov_paths active
+        zarr_acquisition_active = False
+        zarr_fov_paths = ["/path/to/fov.zarr"]
         assert is_zarr_push_mode_active()
 
 
@@ -546,3 +591,98 @@ class TestMemoryBoundedLRUCacheInvalidate:
             t.join()
 
         assert len(errors) == 0, f"Thread safety errors: {errors}"
+
+
+class TestWriteZarrMetadata:
+    """Tests for _write_zarr_metadata function in simulate_zarr_acquisition.py."""
+
+    def test_merge_into_existing_preserves_array_structure(self, tmp_path):
+        """Test that merge_into_existing=True preserves existing zarr.json structure."""
+        import json
+        import sys
+
+        # Import the function from simulate script
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from simulate_zarr_acquisition import _write_zarr_metadata
+
+        zarr_path = tmp_path / "test.zarr"
+        zarr_path.mkdir()
+
+        # Create an existing array zarr.json (simulating what tensorstore creates)
+        existing_zarr_json = {
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [4, 10, 3, 5, 512, 512],
+            "data_type": "uint16",
+            "chunk_grid": {
+                "name": "regular",
+                "configuration": {"chunk_shape": [1, 1, 1, 1, 512, 512]},
+            },
+            "chunk_key_encoding": {"name": "default"},
+            "fill_value": 0,
+            "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+        }
+        with open(zarr_path / "zarr.json", "w") as f:
+            json.dump(existing_zarr_json, f)
+
+        # Call with merge_into_existing=True
+        _write_zarr_metadata(
+            zarr_path,
+            channels=["DAPI", "GFP", "RFP"],
+            channel_colors=["#0000FF", "#00FF00", "#FF0000"],
+            pixel_size_um=0.25,
+            z_step_um=1.0,
+            merge_into_existing=True,
+        )
+
+        # Read the result
+        with open(zarr_path / "zarr.json", "r") as f:
+            result = json.load(f)
+
+        # Should preserve array structure
+        assert result["zarr_format"] == 3
+        assert result["node_type"] == "array"
+        assert result["shape"] == [4, 10, 3, 5, 512, 512]
+        assert result["data_type"] == "uint16"
+
+        # Should have added attributes
+        assert "attributes" in result
+        assert "ome" in result["attributes"]
+        assert "multiscales" in result["attributes"]["ome"]
+
+        # Dataset path should be "." for merged (6D at root)
+        datasets = result["attributes"]["ome"]["multiscales"][0]["datasets"]
+        assert datasets[0]["path"] == "."
+
+    def test_non_merge_creates_group_structure(self, tmp_path):
+        """Test that merge_into_existing=False creates a group zarr.json."""
+        import json
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from simulate_zarr_acquisition import _write_zarr_metadata
+
+        zarr_path = tmp_path / "test.zarr"
+        zarr_path.mkdir()
+
+        # Call without merge (default behavior)
+        _write_zarr_metadata(
+            zarr_path,
+            channels=["DAPI", "GFP"],
+            channel_colors=["#0000FF", "#00FF00"],
+            pixel_size_um=0.25,
+            z_step_um=1.0,
+            merge_into_existing=False,
+        )
+
+        # Read the result
+        with open(zarr_path / "zarr.json", "r") as f:
+            result = json.load(f)
+
+        # Should be a group (not array)
+        assert result["zarr_format"] == 3
+        assert result["node_type"] == "group"
+
+        # Dataset path should be "0" for non-merged (array at /0 subdirectory)
+        datasets = result["attributes"]["ome"]["multiscales"][0]["datasets"]
+        assert datasets[0]["path"] == "0"

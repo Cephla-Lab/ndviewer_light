@@ -927,6 +927,8 @@ def open_zarr_tensorstore(path: Path, array_path: str = "0") -> Optional[Any]:
     spec = {
         "driver": driver,
         "kvstore": {"driver": "file", "path": str(full_path)},
+        # Revalidate metadata on each read (default "open" only checks at open time)
+        "recheck_cached_metadata": True,
     }
 
     try:
@@ -1415,8 +1417,6 @@ class LightweightViewer(QWidget):
     _refresh_timer: Optional[QTimer]
 
     # Zarr push-based API state
-    _zarr_acquisition_path: Optional[Path]
-    _zarr_acquisition_store: Optional[Any]  # zarr.Array
     _zarr_acquisition_active: bool
     _zarr_channel_map: Dict[str, int]
 
@@ -1458,8 +1458,6 @@ class LightweightViewer(QWidget):
         self._load_pending: bool = False  # True if load is scheduled
 
         # Zarr push-based API state
-        self._zarr_acquisition_path: Optional[Path] = None
-        self._zarr_acquisition_store = None  # zarr.Array handle
         self._zarr_acquisition_active: bool = False
         self._zarr_channel_map: Dict[str, int] = {}
         self._zarr_debounce_timer: Optional[QTimer] = None  # Debounce for zarr loads
@@ -2122,29 +2120,33 @@ class LightweightViewer(QWidget):
 
     def start_zarr_acquisition(
         self,
-        zarr_path: str,
+        fov_paths: List[str],
         channels: List[str],
         num_z: int,
         fov_labels: List[str],
         height: int,
         width: int,
-        fov_paths: Optional[List[str]] = None,
     ):
-        """Configure viewer for zarr-based live acquisition.
+        """Configure viewer for per-FOV zarr-based live acquisition.
 
         Call this at acquisition start before any notify_zarr_frame() calls.
-        Sets up the viewer with channel configuration and opens the zarr store.
+        Sets up the viewer with channel configuration. Each FOV has its own
+        5D zarr store with shape (T, C, Z, Y, X).
+
+        For 6D zarr structures (FOV, T, C, Z, Y, X), use start_zarr_acquisition_6d() instead.
 
         Args:
-            zarr_path: Path to the zarr store being written to (for single/6d structures)
+            fov_paths: List of zarr paths, one per FOV (e.g., ["fov_0.zarr", "fov_1.zarr"])
             channels: Channel names, e.g. ["DAPI", "GFP", "RFP"]
             num_z: Number of z-levels
             fov_labels: FOV labels, e.g. ["A1:0", "A1:1", "A2:0"]
             height: Image height in pixels
             width: Image width in pixels
-            fov_paths: Optional list of zarr paths, one per FOV (for per_fov/hcs structures).
-                       If provided, zarr_path is ignored and each FOV loads from its own store.
         """
+        # Validate inputs
+        if not fov_paths:
+            raise ValueError("fov_paths must not be empty")
+
         # Stop any running animations and pending loads
         self._stop_play_animation(self._time_play_timer, self._time_play_btn)
         self._stop_play_animation(self._fov_play_timer, self._fov_play_btn)
@@ -2154,7 +2156,6 @@ class LightweightViewer(QWidget):
 
         # Close any existing zarr stores
         with self._zarr_stores_lock:
-            self._zarr_acquisition_store = None
             self._zarr_fov_stores.clear()
             # Also clear 6D regions state (in case switching modes)
             self._zarr_region_stores.clear()
@@ -2176,22 +2177,17 @@ class LightweightViewer(QWidget):
         self._image_width = width
         self._fov_labels = list(fov_labels)
 
-        # Handle per-FOV paths (for per_fov and hcs structures)
-        if fov_paths:
-            if len(fov_paths) != len(fov_labels):
-                logger.warning(
-                    f"fov_paths length ({len(fov_paths)}) does not match "
-                    f"fov_labels length ({len(fov_labels)}), truncating to shorter"
-                )
-                min_len = min(len(fov_paths), len(fov_labels))
-                fov_paths = fov_paths[:min_len]
-                fov_labels = list(fov_labels)[:min_len]
-                self._fov_labels = fov_labels
-            self._zarr_fov_paths = [Path(p) for p in fov_paths]
-            self._zarr_acquisition_path = None  # Not used in per-FOV mode
-        else:
-            self._zarr_fov_paths = []
-            self._zarr_acquisition_path = Path(zarr_path)
+        # Validate and set per-FOV paths
+        if len(fov_paths) != len(fov_labels):
+            logger.warning(
+                f"fov_paths length ({len(fov_paths)}) does not match "
+                f"fov_labels length ({len(fov_labels)}), truncating to shorter"
+            )
+            min_len = min(len(fov_paths), len(fov_labels))
+            fov_paths = list(fov_paths)[:min_len]
+            fov_labels = list(fov_labels)[:min_len]
+            self._fov_labels = fov_labels
+        self._zarr_fov_paths = [Path(p) for p in fov_paths]
 
         # Build channel name to index map
         self._zarr_channel_map = {name: i for i, name in enumerate(self._channel_names)}
@@ -2235,8 +2231,8 @@ class LightweightViewer(QWidget):
         self._update_fov_slider_visibility()
 
         logger.info(
-            f"NDViewer: Started zarr acquisition with {len(channels)} channels, "
-            f"{num_z} z-levels, {len(fov_labels)} FOVs at {zarr_path}"
+            f"NDViewer: Started per-FOV zarr acquisition with {len(channels)} channels, "
+            f"{num_z} z-levels, {len(self._zarr_fov_paths)} FOVs"
         )
 
     def start_zarr_acquisition_6d(
@@ -2272,7 +2268,6 @@ class LightweightViewer(QWidget):
 
         # Close any existing zarr stores
         with self._zarr_stores_lock:
-            self._zarr_acquisition_store = None
             self._zarr_fov_stores.clear()
             self._zarr_region_stores.clear()
 
@@ -2335,8 +2330,7 @@ class LightweightViewer(QWidget):
             for i, c in enumerate(self._channel_names)
         }
 
-        # Clear single-store state (not used in 6d_regions mode)
-        self._zarr_acquisition_path = None
+        # Clear per-FOV state (not used in 6d_regions mode)
         self._zarr_fov_paths = []
 
         # Enable 6d_regions mode
@@ -2512,15 +2506,19 @@ class LightweightViewer(QWidget):
         """Load a single plane from the zarr store using tensorstore.
 
         Uses tensorstore to support both zarr v2 and v3 formats.
+        Supports two modes:
+        - 6D regions mode: each region has a 6D array (FOV, T, C, Z, Y, X)
+        - Per-FOV mode: each FOV has a 5D array (T, C, Z, Y, X)
 
         Args:
             t: Timepoint index
-            fov_idx: FOV index
+            fov_idx: FOV index (global index, converted to region/local for 6D mode)
             z: Z-level index
             channel_idx: Channel index
 
         Returns:
-            Image plane as numpy array, or zeros if not available.
+            Image plane as numpy array, or zeros if data not available or
+            no zarr mode is configured.
         """
         cache_key = ("zarr", t, fov_idx, z, channel_idx)
 
@@ -2558,7 +2556,8 @@ class LightweightViewer(QWidget):
                     logger.debug(
                         f"Opening zarr store for region {region_idx}: {region_path}"
                     )
-                    ts_arr = open_zarr_tensorstore(region_path, array_path="0")
+                    # 6D mode: array is directly at acquisition.zarr, not at /0
+                    ts_arr = open_zarr_tensorstore(region_path, array_path="")
                     if ts_arr is None:
                         logger.debug(
                             f"Zarr store not accessible for region {region_idx}"
@@ -2590,7 +2589,7 @@ class LightweightViewer(QWidget):
             except Exception as e:
                 logger.warning(
                     f"Failed to load zarr plane (region={region_idx}, fov={local_fov_idx}, "
-                    f"t={t}, z={z}, ch={channel_idx}): {e}"
+                    f"t={t}, z={z}, ch={channel_idx}): {type(e).__name__}: {e}"
                 )
                 return np.zeros(
                     (self._image_height, self._image_width), dtype=np.uint16
@@ -2620,42 +2619,13 @@ class LightweightViewer(QWidget):
                 arr = self._zarr_fov_stores[fov_idx]
 
         else:
-            # Single-store mode (single/6d structures, thread-safe)
-            with self._zarr_stores_lock:
-                if self._zarr_acquisition_store is None and self._zarr_acquisition_path:
-                    ts_arr = open_zarr_tensorstore(
-                        self._zarr_acquisition_path, array_path="0"
-                    )
-                    if ts_arr is None:
-                        logger.debug("Zarr store not accessible")
-                        return np.zeros(
-                            (self._image_height, self._image_width), dtype=np.uint16
-                        )
-                    self._zarr_acquisition_store = ts_arr
-                arr = self._zarr_acquisition_store
-
-        if arr is None:
+            # No valid zarr mode configured
+            logger.warning("No zarr paths configured for loading")
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
+        # Per-FOV mode: read from 5D array (T, C, Z, Y, X)
         try:
-            # Read plane: typical zarr order is (T, C, Z, Y, X) or (T, FOV, C, Z, Y, X)
-            # Try different indexing based on array dimensions
-            ndim = len(arr.shape)
-            if ndim == 6:
-                # (T, FOV, C, Z, Y, X)
-                plane = arr[t, fov_idx, channel_idx, z, :, :].read().result()
-            elif ndim == 5:
-                # (T, C, Z, Y, X) - single FOV or per-FOV store
-                plane = arr[t, channel_idx, z, :, :].read().result()
-            elif ndim == 4:
-                # (C, Z, Y, X) - single timepoint
-                plane = arr[channel_idx, z, :, :].read().result()
-            else:
-                logger.warning(f"Unexpected zarr dimensions: {arr.shape}")
-                return np.zeros(
-                    (self._image_height, self._image_width), dtype=np.uint16
-                )
-
+            plane = arr[t, channel_idx, z, :, :].read().result()
             plane = np.asarray(plane)
             # Cache if not in live acquisition, or if plane was written before we read.
             # Using was_written_before_read prevents race with notify_zarr_frame.
@@ -2672,7 +2642,8 @@ class LightweightViewer(QWidget):
         except Exception as e:
             # Unexpected errors - log with more visibility
             logger.warning(
-                f"Failed to load zarr plane (t={t}, fov={fov_idx}, z={z}, ch={channel_idx}): {e}"
+                f"Failed to load zarr plane (t={t}, fov={fov_idx}, z={z}, ch={channel_idx}): "
+                f"{type(e).__name__}: {e}"
             )
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
@@ -2699,6 +2670,17 @@ class LightweightViewer(QWidget):
                 if self._zarr_acquisition_active:
                     QTimer.singleShot(500, self._load_current_zarr_fov)
                 return
+
+        # Check if store is ready for 6D regions mode
+        if self._zarr_6d_regions_mode and self._zarr_region_paths:
+            region_idx, _ = self._global_to_region_fov(fov_idx)
+            if region_idx < len(self._zarr_region_paths):
+                zarr_json = self._zarr_region_paths[region_idx] / "zarr.json"
+                if not zarr_json.exists():
+                    # Store not ready yet, retry later
+                    if self._zarr_acquisition_active:
+                        QTimer.singleShot(500, self._load_current_zarr_fov)
+                    return
 
         import dask
         import dask.array as da
@@ -2735,7 +2717,6 @@ class LightweightViewer(QWidget):
         """Check if zarr push-based mode is active."""
         return (
             self._zarr_acquisition_active
-            or self._zarr_acquisition_path is not None
             or bool(self._zarr_fov_paths)
             or self._zarr_6d_regions_mode
         )
@@ -2782,10 +2763,8 @@ class LightweightViewer(QWidget):
         # Clean up zarr state
         self._zarr_acquisition_active = False
         with self._zarr_stores_lock:
-            self._zarr_acquisition_store = None
             self._zarr_fov_stores.clear()
             self._zarr_region_stores.clear()
-        self._zarr_acquisition_path = None
         self._zarr_fov_paths = []
         # Clean up 6d_regions state
         self._zarr_region_paths = []
