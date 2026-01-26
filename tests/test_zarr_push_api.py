@@ -325,18 +325,14 @@ class TestMultiRegion6D:
 
     def test_6d_regions_push_mode_detection(self):
         """Test is_zarr_push_mode_active includes 6d_regions mode."""
-        # Simulate is_zarr_push_mode_active logic
+        # Simulate is_zarr_push_mode_active logic (matches core.py implementation)
         zarr_acquisition_active = False
-        zarr_acquisition_path = None
         zarr_fov_paths = []
         zarr_6d_regions_mode = False
 
         def is_zarr_push_mode_active():
             return (
-                zarr_acquisition_active
-                or zarr_acquisition_path is not None
-                or bool(zarr_fov_paths)
-                or zarr_6d_regions_mode
+                zarr_acquisition_active or bool(zarr_fov_paths) or zarr_6d_regions_mode
             )
 
         # None active
@@ -349,6 +345,11 @@ class TestMultiRegion6D:
         # Reset and check acquisition active
         zarr_6d_regions_mode = False
         zarr_acquisition_active = True
+        assert is_zarr_push_mode_active()
+
+        # Reset and check fov_paths active
+        zarr_acquisition_active = False
+        zarr_fov_paths = ["/path/to/fov.zarr"]
         assert is_zarr_push_mode_active()
 
 
