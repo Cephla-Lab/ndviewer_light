@@ -927,9 +927,8 @@ def open_zarr_tensorstore(path: Path, array_path: str = "0") -> Optional[Any]:
     spec = {
         "driver": driver,
         "kvstore": {"driver": "file", "path": str(full_path)},
-        # Revalidate cache on access to see fresh writes from other processes
+        # Revalidate metadata on each read (default "open" only checks at open time)
         "recheck_cached_metadata": True,
-        "recheck_cached_data": True,
     }
 
     try:
