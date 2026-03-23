@@ -46,9 +46,10 @@ def create_macos_app(exe, module):
     # Source user's shell profile so PATH includes conda/venv/pip environments
     launcher = macos / COMMAND_NAME
     launcher.write_text(
-        f"#!/bin/bash\n"
-        f'[ -f "$HOME/.bash_profile" ] && source "$HOME/.bash_profile"\n'
-        f'[ -f "$HOME/.zprofile" ] && source "$HOME/.zprofile"\n'
+        "#!/bin/bash\n"
+        '[ -f "$HOME/.bash_profile" ] && source "$HOME/.bash_profile"\n'
+        '[ -f "$HOME/.zprofile" ] && source "$HOME/.zprofile"\n'
+        '[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"\n'
         f"{launch_cmd}\n"
     )
     os.chmod(launcher, 0o755)
