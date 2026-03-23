@@ -43,8 +43,14 @@ def create_macos_app(exe, module):
     else:
         launch_cmd = f'exec "{exe}" "$@"'
 
+    # Source user's shell profile so PATH includes conda/venv/pip environments
     launcher = macos / COMMAND_NAME
-    launcher.write_text(f"#!/bin/bash\n{launch_cmd}\n")
+    launcher.write_text(
+        f"#!/bin/bash\n"
+        f'[ -f "$HOME/.bash_profile" ] && source "$HOME/.bash_profile"\n'
+        f'[ -f "$HOME/.zprofile" ] && source "$HOME/.zprofile"\n'
+        f"{launch_cmd}\n"
+    )
     os.chmod(launcher, 0o755)
 
     version = _get_version()
@@ -76,22 +82,26 @@ def create_macos_app(exe, module):
     print("You can drag it to the Dock from ~/Applications.")
 
 
+def _ps_escape(value):
+    """Escape a string for safe interpolation into a PowerShell double-quoted string."""
+    return str(value).replace("`", "``").replace('"', '`"').replace("$", "`$")
+
+
 def create_windows_shortcut(exe, module):
-    target = exe
     args = f"-m {module}" if module else ""
 
     desktop = Path.home() / "Desktop"
     shortcut_path = desktop / f"{APP_NAME}.lnk"
 
-    ps_script = f"""
-$ws = New-Object -ComObject WScript.Shell
-$sc = $ws.CreateShortcut("{shortcut_path}")
-$sc.TargetPath = "{target}"
-$sc.Arguments = '{args}'
-$sc.WorkingDirectory = "{Path.home()}"
-$sc.Description = "{APP_NAME} - 5D Image Viewer"
-$sc.Save()
-"""
+    ps_script = (
+        "$ws = New-Object -ComObject WScript.Shell\n"
+        f'$sc = $ws.CreateShortcut("{_ps_escape(shortcut_path)}")\n'
+        f'$sc.TargetPath = "{_ps_escape(exe)}"\n'
+        f"$sc.Arguments = '{args}'\n"
+        f'$sc.WorkingDirectory = "{_ps_escape(Path.home())}"\n'
+        f'$sc.Description = "{APP_NAME} - 5D Image Viewer"\n'
+        "$sc.Save()\n"
+    )
     subprocess.run(
         ["powershell", "-NoProfile", "-Command", ps_script],
         check=True,
