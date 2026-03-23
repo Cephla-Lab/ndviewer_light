@@ -142,11 +142,14 @@ def create_linux_desktop_entry(exe, module):
         desktop_path = desktop_dir / "ndviewer-light.desktop"
         desktop_path.write_text(entry_content)
         os.chmod(desktop_path, 0o755)
-        # Mark as trusted on GNOME (Ubuntu)
-        subprocess.run(
-            ["gio", "set", str(desktop_path), "metadata::trusted", "true"],
-            capture_output=True,
-        )
+        # Mark as trusted on GNOME (Ubuntu); skip if gio is unavailable
+        try:
+            subprocess.run(
+                ["gio", "set", str(desktop_path), "metadata::trusted", "true"],
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            pass
         print(f"Created: {desktop_path}")
 
 
