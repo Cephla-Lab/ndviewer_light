@@ -2006,8 +2006,16 @@ class LightweightViewer(QWidget):
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            with tf.TiffFile(filepath) as tif:
-                plane = tif.pages[0].asarray()
+            # Support page-indexed paths: "path.tiff#page_idx" for OME-TIFF stacks
+            if "#" in filepath:
+                actual_path, page_str = filepath.rsplit("#", 1)
+                page_idx = int(page_str)
+            else:
+                actual_path = filepath
+                page_idx = 0
+
+            with tf.TiffFile(actual_path) as tif:
+                plane = tif.pages[page_idx].asarray()
                 self._plane_cache.put(cache_key, plane)
                 return plane
         except FileNotFoundError:
