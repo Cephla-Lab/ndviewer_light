@@ -1598,6 +1598,9 @@ class LightweightViewer(QWidget):
         fov_layout.addWidget(self._fov_play_btn)
         fov_layout.addWidget(self._fov_label)
         fov_layout.addWidget(self._fov_slider)
+        self._fov_slider_container.setVisible(
+            False
+        )  # Hidden until push API sets FOV labels
         slider_layout.addWidget(self._fov_slider_container)
 
         layout.addWidget(slider_container)
