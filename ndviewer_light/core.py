@@ -3605,9 +3605,7 @@ class LightweightViewer(QWidget):
                 chunks = tuple(
                     1 if i < len(shape) - 2 else s for i, s in enumerate(shape)
                 )
-                darr = da.from_array(
-                    _TensorStoreArrayWrapper(ts_arr), chunks=chunks
-                )
+                darr = da.from_array(_TensorStoreArrayWrapper(ts_arr), chunks=chunks)
 
                 # Ensure shape is (T, C, Z, Y, X)
                 if len(darr.shape) == 4:
