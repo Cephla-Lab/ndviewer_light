@@ -1447,7 +1447,7 @@ class LightweightViewer(QWidget):
         self._file_index_lock = threading.Lock()
         # Cache open TiffFile handles to avoid re-parsing IFD chains for
         # multi-page OME-TIFFs where many planes share the same file.
-        self._tiff_handles: Dict[str, Any] = {}  # filepath -> TiffFile
+        self._tiff_handles: Dict[str, Any] = {}
         self._tiff_handles_lock = threading.Lock()
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._channel_names: List[str] = []
@@ -2025,14 +2025,23 @@ class LightweightViewer(QWidget):
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            # Reuse cached TiffFile handle to avoid re-parsing IFD chains
-            # for multi-page OME-TIFFs where many planes share the same file.
-            with self._tiff_handles_lock:
+            if page_idx == 0:
+                # Single-page file: open, read, close — no caching needed.
+                with tf.TiffFile(filepath) as tif:
+                    plane = tif.pages[0].asarray()
+            else:
+                # Multi-page OME-TIFF: cache the handle to avoid re-parsing
+                # the IFD chain on every page read from the same file.
+                # Lock-free read first (CPython dict.get is atomic under GIL),
+                # only take the lock when creating a new handle.
                 tif = self._tiff_handles.get(filepath)
                 if tif is None:
-                    tif = tf.TiffFile(filepath)
-                    self._tiff_handles[filepath] = tif
-            plane = tif.pages[page_idx].asarray()
+                    with self._tiff_handles_lock:
+                        tif = self._tiff_handles.get(filepath)
+                        if tif is None:
+                            tif = tf.TiffFile(filepath)
+                            self._tiff_handles[filepath] = tif
+                plane = tif.pages[page_idx].asarray()
             self._plane_cache.put(cache_key, plane)
             return plane
         except FileNotFoundError:
