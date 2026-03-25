@@ -1445,6 +1445,10 @@ class LightweightViewer(QWidget):
         # (t, fov_idx, z, channel) -> (filepath, page_idx)
         self._file_index: Dict[Tuple[int, int, int, str], Tuple[str, int]] = {}
         self._file_index_lock = threading.Lock()
+        # Cache open TiffFile handles to avoid re-parsing IFD chains for
+        # multi-page OME-TIFFs where many planes share the same file.
+        self._tiff_handles: Dict[str, Any] = {}  # filepath -> TiffFile
+        self._tiff_handles_lock = threading.Lock()
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
@@ -1730,6 +1734,7 @@ class LightweightViewer(QWidget):
         # Clear previous state
         with self._file_index_lock:
             self._file_index.clear()
+        self._close_tiff_handle_cache()
         self._plane_cache.clear()
         self._max_fov_per_time.clear()
 
@@ -2020,10 +2025,16 @@ class LightweightViewer(QWidget):
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            with tf.TiffFile(filepath) as tif:
-                plane = tif.pages[page_idx].asarray()
-                self._plane_cache.put(cache_key, plane)
-                return plane
+            # Reuse cached TiffFile handle to avoid re-parsing IFD chains
+            # for multi-page OME-TIFFs where many planes share the same file.
+            with self._tiff_handles_lock:
+                tif = self._tiff_handles.get(filepath)
+                if tif is None:
+                    tif = tf.TiffFile(filepath)
+                    self._tiff_handles[filepath] = tif
+            plane = tif.pages[page_idx].asarray()
+            self._plane_cache.put(cache_key, plane)
+            return plane
         except FileNotFoundError:
             logger.warning("Image file not found (may have been deleted): %s", filepath)
         except IndexError:
@@ -2776,6 +2787,13 @@ class LightweightViewer(QWidget):
         self._close_tiff_handles(getattr(self, "_open_handles", []))
         self._open_handles = []
 
+    def _close_tiff_handle_cache(self):
+        """Close cached TiffFile handles used by push-based OME-TIFF loading."""
+        with self._tiff_handles_lock:
+            handles = list(self._tiff_handles.values())
+            self._tiff_handles.clear()
+        self._close_tiff_handles(handles)
+
     def closeEvent(self, event):
         """Clean up resources when the widget is closed."""
         if self._refresh_timer:
@@ -2802,6 +2820,7 @@ class LightweightViewer(QWidget):
         with self._zarr_written_planes_lock:
             self._zarr_written_planes.clear()
         self._close_open_handles()
+        self._close_tiff_handle_cache()
         super().closeEvent(event)
 
     def _force_refresh(self):
