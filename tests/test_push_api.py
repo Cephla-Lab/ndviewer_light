@@ -449,10 +449,12 @@ class _PlaneLoader:
             return cached
 
         with self.lock:
-            filepath = self.file_index.get(cache_key)
+            entry = self.file_index.get(cache_key)
 
-        if not filepath:
+        if entry is None:
             return np.zeros((self.height, self.width), dtype=np.uint16)
+
+        filepath, page_idx = entry
 
         if not self.load_from_disk:
             self.disk_reads += 1
@@ -460,7 +462,7 @@ class _PlaneLoader:
 
         try:
             with self._tf.TiffFile(filepath) as tif:
-                plane = tif.pages[0].asarray()
+                plane = tif.pages[page_idx].asarray()
                 self.cache.put(cache_key, plane)
                 self.disk_reads += 1
                 return plane
@@ -485,7 +487,7 @@ class TestLoadSinglePlane:
     def test_load_single_plane_returns_zeros_on_file_not_found(self):
         """_load_single_plane returns zeros when file doesn't exist."""
         loader = _PlaneLoader(height=100, width=100, load_from_disk=True)
-        loader.file_index[(0, 0, 0, "BF")] = "/nonexistent/path/image.tiff"
+        loader.file_index[(0, 0, 0, "BF")] = ("/nonexistent/path/image.tiff", 0)
 
         result = loader.load(0, 0, 0, "BF")
 
@@ -508,7 +510,7 @@ class TestLoadSinglePlane:
             test_image = np.random.randint(0, 65535, (50, 50), dtype=np.uint16)
             tf.imwrite(temp_path, test_image)
 
-            loader.file_index[(0, 0, 0, "BF")] = temp_path
+            loader.file_index[(0, 0, 0, "BF")] = (temp_path, 0)
             result = loader.load(0, 0, 0, "BF")
 
             assert result.shape == (50, 50)

@@ -1443,7 +1443,7 @@ class LightweightViewer(QWidget):
         # External navigation state (push-based API for live acquisition)
         # _file_index is accessed from both main thread and dask workers, needs lock
         # (t, fov_idx, z, channel) -> (filepath, page_idx)
-        self._file_index: Dict[tuple, tuple] = {}
+        self._file_index: Dict[Tuple[int, int, int, str], Tuple[str, int]] = {}
         self._file_index_lock = threading.Lock()
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._channel_names: List[str] = []
@@ -2009,7 +2009,7 @@ class LightweightViewer(QWidget):
         with self._file_index_lock:
             entry = self._file_index.get(cache_key)
 
-        if not entry:
+        if entry is None:
             # File not yet registered - expected during acquisition, not an error
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
