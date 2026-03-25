@@ -2028,21 +2028,25 @@ class LightweightViewer(QWidget):
             # Cache TiffFile handles to avoid re-parsing the IFD chain on
             # every page read from the same file (matters for multi-page
             # OME-TIFFs; negligible overhead for single-page files).
+            # Hold the lock through the page read to prevent concurrent
+            # access to the same TiffFile handle from dask worker threads.
             with self._tiff_handles_lock:
                 tif = self._tiff_handles.get(filepath)
                 if tif is None:
                     tif = tf.TiffFile(filepath)
                     self._tiff_handles[filepath] = tif
-            plane = tif.pages[page_idx].asarray()
+                plane = tif.pages[page_idx].asarray()
             self._plane_cache.put(cache_key, plane)
             return plane
         except FileNotFoundError:
             logger.warning("Image file not found (may have been deleted): %s", filepath)
         except IndexError:
-            # Evict stale handle so next attempt re-parses the file
-            # (the writer may have appended new pages since we opened it).
+            # Evict and close stale handle so next attempt re-parses the
+            # file (the writer may have appended new pages since we opened it).
             with self._tiff_handles_lock:
-                self._tiff_handles.pop(filepath, None)
+                stale_handle = self._tiff_handles.pop(filepath, None)
+            if stale_handle is not None:
+                self._close_tiff_handles([stale_handle])
             logger.warning(
                 "Page %d not available in %s (file may still be writing)",
                 page_idx,

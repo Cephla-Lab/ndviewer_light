@@ -557,6 +557,30 @@ class TestLoadSinglePlane:
         finally:
             os.unlink(temp_path)
 
+    def test_load_single_plane_returns_zeros_on_out_of_range_page(self):
+        """_load_single_plane returns zeros when page_idx is out of range."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            # Write a single-page TIFF
+            test_image = np.ones((50, 50), dtype=np.uint16) * 42
+            tf.imwrite(temp_path, test_image)
+
+            # Request page 5 (out of range)
+            loader.file_index[(0, 0, 0, "BF")] = (temp_path, 5)
+            result = loader.load(0, 0, 0, "BF")
+
+            assert result.shape == (50, 50)
+            assert result.dtype == np.uint16
+            assert np.all(result == 0)
+        finally:
+            os.unlink(temp_path)
+
     def test_load_single_plane_uses_cache(self):
         """_load_single_plane returns cached data without disk access."""
         loader = _PlaneLoader(height=50, width=50)
