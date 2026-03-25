@@ -651,8 +651,10 @@ class TestLoadSinglePlane:
         from ndviewer_light.core import LightweightViewer
 
         sig = _inspect.signature(LightweightViewer.register_image)
-        if "page_idx" not in sig.parameters:
-            return  # Skip if running against older installed version
+        assert "page_idx" in sig.parameters, (
+            "LightweightViewer.register_image is missing 'page_idx' parameter. "
+            "Tests may be running against an outdated ndviewer_light install."
+        )
 
         import pytest
 
