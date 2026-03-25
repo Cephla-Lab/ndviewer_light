@@ -1442,7 +1442,8 @@ class LightweightViewer(QWidget):
 
         # External navigation state (push-based API for live acquisition)
         # _file_index is accessed from both main thread and dask workers, needs lock
-        self._file_index: Dict[tuple, str] = {}  # (t, fov_idx, z, channel) -> filepath
+        # (t, fov_idx, z, channel) -> (filepath, page_idx)
+        self._file_index: Dict[tuple, tuple] = {}
         self._file_index_lock = threading.Lock()
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._channel_names: List[str] = []
@@ -1807,7 +1808,15 @@ class LightweightViewer(QWidget):
         self._xarray_data = xarr
         self._set_ndv_data(xarr)
 
-    def register_image(self, t: int, fov_idx: int, z: int, channel: str, filepath: str):
+    def register_image(
+        self,
+        t: int,
+        fov_idx: int,
+        z: int,
+        channel: str,
+        filepath: str,
+        page_idx: int = 0,
+    ):
         """Register a newly saved image file.
 
         Thread-safe: can be called from worker thread.
@@ -1818,13 +1827,14 @@ class LightweightViewer(QWidget):
             fov_idx: FOV index (0-based)
             z: Z-level index
             channel: Channel name
-            filepath: Path to the saved TIFF file.  For OME-TIFF stacks,
-                append ``#<page_idx>`` to select a specific page
-                (e.g., ``"scan.ome.tiff#5"``).
+            filepath: Path to the saved TIFF file
+            page_idx: Page index within the TIFF file (default 0).
+                For OME-TIFF stacks that store multiple planes per file,
+                specify which page to read.
         """
         # Update file index (protected by lock for dask worker thread safety)
         with self._file_index_lock:
-            self._file_index[(t, fov_idx, z, channel)] = filepath
+            self._file_index[(t, fov_idx, z, channel)] = (filepath, page_idx)
 
         # Emit signal with raw indices - main thread computes max values
         # to avoid race condition on _max_time_idx
@@ -1997,53 +2007,37 @@ class LightweightViewer(QWidget):
 
         # Load from file (lock protects concurrent access from dask workers)
         with self._file_index_lock:
-            filepath = self._file_index.get(cache_key)
+            entry = self._file_index.get(cache_key)
 
-        if not filepath:
+        if not entry:
             # File not yet registered - expected during acquisition, not an error
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+        filepath, page_idx = entry
 
         if not LAZY_LOADING_AVAILABLE:
             logger.error("tifffile not available for loading image planes")
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
-        # Support page-indexed paths: "path.tiff#page_idx" for OME-TIFF stacks
-        if "#" in filepath:
-            actual_path, page_str = filepath.rsplit("#", 1)
-            try:
-                page_idx = int(page_str)
-            except ValueError:
-                logger.error(
-                    "Invalid page index '%s' in filepath: %s", page_str, filepath
-                )
-                return np.zeros(
-                    (self._image_height, self._image_width), dtype=np.uint16
-                )
-        else:
-            actual_path = filepath
-            page_idx = 0
-
         try:
-            with tf.TiffFile(actual_path) as tif:
+            with tf.TiffFile(filepath) as tif:
                 plane = tif.pages[page_idx].asarray()
                 self._plane_cache.put(cache_key, plane)
                 return plane
         except FileNotFoundError:
-            logger.warning(
-                "Image file not found (may have been deleted): %s", actual_path
-            )
+            logger.warning("Image file not found (may have been deleted): %s", filepath)
         except IndexError:
             logger.warning(
                 "Page %d not available in %s (file may still be writing)",
                 page_idx,
-                actual_path,
+                filepath,
             )
         except PermissionError as e:
-            logger.error("Permission denied reading image %s: %s", actual_path, e)
+            logger.error("Permission denied reading image %s: %s", filepath, e)
         except Exception as e:
             logger.error(
                 "Failed to load image plane %s page %d (t=%d, fov=%d, z=%d, ch=%s): %s",
-                actual_path,
+                filepath,
                 page_idx,
                 t,
                 fov_idx,
