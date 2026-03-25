@@ -1447,8 +1447,10 @@ class LightweightViewer(QWidget):
         self._file_index_lock = threading.Lock()
         # Cache open TiffFile handles to avoid re-parsing IFD chains for
         # multi-page OME-TIFFs where many planes share the same file.
-        self._tiff_handles: Dict[str, Any] = {}
+        # Bounded to avoid fd exhaustion with thousands of OME-TIFFs.
+        self._tiff_handles: OrderedDict = OrderedDict()
         self._tiff_handles_lock = threading.Lock()
+        self._tiff_handles_max = 128
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
@@ -2036,12 +2038,21 @@ class LightweightViewer(QWidget):
                 # the IFD chain on every page read from the same file.
                 # Hold the lock through the page read to prevent concurrent
                 # access to the same TiffFile handle from dask worker threads.
+                evicted = []
                 with self._tiff_handles_lock:
                     tif = self._tiff_handles.get(filepath)
-                    if tif is None:
+                    if tif is not None:
+                        self._tiff_handles.move_to_end(filepath)
+                    else:
                         tif = tf.TiffFile(filepath)
                         self._tiff_handles[filepath] = tif
+                        # Evict LRU handles if over limit
+                        while len(self._tiff_handles) > self._tiff_handles_max:
+                            _, old_tif = self._tiff_handles.popitem(last=False)
+                            evicted.append(old_tif)
                     plane = tif.pages[page_idx].asarray()
+                # Close evicted handles outside the lock
+                self._close_tiff_handles(evicted)
             self._plane_cache.put(cache_key, plane)
             return plane
         except FileNotFoundError:
