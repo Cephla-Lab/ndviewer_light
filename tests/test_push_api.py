@@ -721,6 +721,143 @@ class TestLoadSinglePlane:
         assert loader.disk_reads == 0  # No disk read occurred
 
 
+class TestLRUHandleCache:
+    """Tests for the TiffFile handle LRU cache."""
+
+    def test_cache_stays_bounded_under_stress(self):
+        """Handle cache does not exceed max size with many files."""
+        import tifffile as tf
+
+        from ndviewer_light.core import LightweightViewer
+
+        viewer = LightweightViewer.__new__(LightweightViewer)
+        viewer._tiff_handles = __import__("collections").OrderedDict()
+        viewer._tiff_handles_lock = threading.Lock()
+        viewer._tiff_handles_max = 8  # Small limit for fast test
+        viewer._file_index = {}
+        viewer._file_index_lock = threading.Lock()
+        viewer._plane_cache = __import__(
+            "ndviewer_light", fromlist=["MemoryBoundedLRUCache"]
+        ).MemoryBoundedLRUCache(max_memory_bytes=64 * 1024 * 1024)
+        viewer._image_height = 32
+        viewer._image_width = 32
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            # Create 20 multi-page TIFFs (more than cache max of 8)
+            for fov in range(20):
+                path = os.path.join(tmpdir, f"fov{fov}.tiff")
+                with tf.TiffWriter(path) as tw:
+                    for c in range(3):
+                        tw.write(
+                            np.full((32, 32), fill_value=fov * 100 + c, dtype=np.uint16)
+                        )
+                for c in range(3):
+                    viewer.register_image(
+                        t=0,
+                        fov_idx=fov,
+                        z=0,
+                        channel=f"Ch{c}",
+                        filepath=path,
+                        page_idx=c,
+                    )
+
+            # Force loading planes from all 20 files
+            for fov in range(20):
+                for c in range(3):
+                    viewer._load_single_plane(0, fov, 0, f"Ch{c}")
+
+            assert (
+                len(viewer._tiff_handles) <= viewer._tiff_handles_max
+            ), f"Cache size {len(viewer._tiff_handles)} exceeds max {viewer._tiff_handles_max}"
+        finally:
+            # Clean up handles
+            for tif, _ in viewer._tiff_handles.values():
+                try:
+                    tif.close()
+                except Exception:
+                    pass
+            viewer._tiff_handles.clear()
+            import shutil
+
+            shutil.rmtree(tmpdir)
+
+    def test_concurrent_register_and_load(self):
+        """Concurrent registration and loading does not corrupt state."""
+        import tifffile as tf
+
+        from ndviewer_light.core import LightweightViewer
+
+        viewer = LightweightViewer.__new__(LightweightViewer)
+        viewer._tiff_handles = __import__("collections").OrderedDict()
+        viewer._tiff_handles_lock = threading.Lock()
+        viewer._tiff_handles_max = 128
+        viewer._file_index = {}
+        viewer._file_index_lock = threading.Lock()
+        viewer._plane_cache = __import__(
+            "ndviewer_light", fromlist=["MemoryBoundedLRUCache"]
+        ).MemoryBoundedLRUCache(max_memory_bytes=64 * 1024 * 1024)
+        viewer._image_height = 32
+        viewer._image_width = 32
+
+        n_fovs = 20
+        n_channels = 4
+        tmpdir = tempfile.mkdtemp()
+        errors = []
+
+        try:
+            # Pre-create files
+            paths = []
+            for fov in range(n_fovs):
+                path = os.path.join(tmpdir, f"fov{fov}.tiff")
+                paths.append(path)
+                with tf.TiffWriter(path) as tw:
+                    for c in range(n_channels):
+                        tw.write(
+                            np.full((32, 32), fill_value=fov * 100 + c, dtype=np.uint16)
+                        )
+
+            def worker(fov_start, fov_end):
+                try:
+                    for fov in range(fov_start, fov_end):
+                        for c in range(n_channels):
+                            viewer.register_image(
+                                t=0,
+                                fov_idx=fov,
+                                z=0,
+                                channel=f"Ch{c}",
+                                filepath=paths[fov],
+                                page_idx=c,
+                            )
+                            viewer._load_single_plane(0, fov, 0, f"Ch{c}")
+                except Exception as e:
+                    errors.append(e)
+
+            threads = []
+            chunk = n_fovs // 4
+            for i in range(4):
+                start = i * chunk
+                end = start + chunk if i < 3 else n_fovs
+                t = threading.Thread(target=worker, args=(start, end))
+                threads.append(t)
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert not errors, f"Concurrent ops failed: {errors}"
+            assert len(viewer._file_index) == n_fovs * n_channels
+        finally:
+            for tif, _ in viewer._tiff_handles.values():
+                try:
+                    tif.close()
+                except Exception:
+                    pass
+            viewer._tiff_handles.clear()
+            import shutil
+
+            shutil.rmtree(tmpdir)
+
+
 def _format_fov_label(fov_labels, value):
     """Format FOV label text for the given slider value.
 
