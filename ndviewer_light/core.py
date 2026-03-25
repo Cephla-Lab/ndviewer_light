@@ -1818,7 +1818,9 @@ class LightweightViewer(QWidget):
             fov_idx: FOV index (0-based)
             z: Z-level index
             channel: Channel name
-            filepath: Path to the saved TIFF file
+            filepath: Path to the saved TIFF file.  For OME-TIFF stacks,
+                append ``#<page_idx>`` to select a specific page
+                (e.g., ``"scan.ome.tiff#5"``).
         """
         # Update file index (protected by lock for dask worker thread safety)
         with self._file_index_lock:
@@ -2005,27 +2007,44 @@ class LightweightViewer(QWidget):
             logger.error("tifffile not available for loading image planes")
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
-        try:
-            # Support page-indexed paths: "path.tiff#page_idx" for OME-TIFF stacks
-            if "#" in filepath:
-                actual_path, page_str = filepath.rsplit("#", 1)
+        # Support page-indexed paths: "path.tiff#page_idx" for OME-TIFF stacks
+        if "#" in filepath:
+            actual_path, page_str = filepath.rsplit("#", 1)
+            try:
                 page_idx = int(page_str)
-            else:
-                actual_path = filepath
-                page_idx = 0
+            except ValueError:
+                logger.error(
+                    "Invalid page index '%s' in filepath: %s", page_str, filepath
+                )
+                return np.zeros(
+                    (self._image_height, self._image_width), dtype=np.uint16
+                )
+        else:
+            actual_path = filepath
+            page_idx = 0
 
+        try:
             with tf.TiffFile(actual_path) as tif:
                 plane = tif.pages[page_idx].asarray()
                 self._plane_cache.put(cache_key, plane)
                 return plane
         except FileNotFoundError:
-            logger.warning("Image file not found (may have been deleted): %s", filepath)
+            logger.warning(
+                "Image file not found (may have been deleted): %s", actual_path
+            )
+        except IndexError:
+            logger.warning(
+                "Page %d not available in %s (file may still be writing)",
+                page_idx,
+                actual_path,
+            )
         except PermissionError as e:
-            logger.error("Permission denied reading image %s: %s", filepath, e)
+            logger.error("Permission denied reading image %s: %s", actual_path, e)
         except Exception as e:
             logger.error(
-                "Failed to load image plane %s (t=%d, fov=%d, z=%d, ch=%s): %s",
-                filepath,
+                "Failed to load image plane %s page %d (t=%d, fov=%d, z=%d, ch=%s): %s",
+                actual_path,
+                page_idx,
                 t,
                 fov_idx,
                 z,
