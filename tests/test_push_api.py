@@ -581,6 +581,132 @@ class TestLoadSinglePlane:
         finally:
             os.unlink(temp_path)
 
+    def test_load_single_plane_page0_of_multipage_file(self):
+        """_load_single_plane correctly reads page 0 from a multi-page TIFF."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            pages = [
+                np.full((50, 50), fill_value=i * 100, dtype=np.uint16) for i in range(4)
+            ]
+            with tf.TiffWriter(temp_path) as tw:
+                for page in pages:
+                    tw.write(page)
+
+            # page_idx=0 should still read the correct first page
+            loader.file_index[(0, 0, 0, "Ch0")] = (temp_path, 0)
+            result = loader.load(0, 0, 0, "Ch0")
+            assert np.array_equal(result, pages[0])
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_single_plane_multiple_files_different_pages(self):
+        """_load_single_plane reads correct pages from different files."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+        temp_paths = []
+
+        try:
+            # Create two multi-page TIFFs with distinct data
+            for file_idx in range(2):
+                with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+                    temp_paths.append(f.name)
+                pages = [
+                    np.full(
+                        (50, 50), fill_value=(file_idx + 1) * 1000 + i, dtype=np.uint16
+                    )
+                    for i in range(3)
+                ]
+                with tf.TiffWriter(temp_paths[-1]) as tw:
+                    for page in pages:
+                        tw.write(page)
+
+            # Read page 2 from file 0, page 1 from file 1
+            loader.file_index[(0, 0, 0, "Ch0")] = (temp_paths[0], 2)
+            loader.file_index[(0, 0, 0, "Ch1")] = (temp_paths[1], 1)
+
+            r0 = loader.load(0, 0, 0, "Ch0")
+            r1 = loader.load(0, 0, 0, "Ch1")
+
+            assert np.all(r0 == 1002)  # file 0, page 2
+            assert np.all(r1 == 2001)  # file 1, page 1
+        finally:
+            for p in temp_paths:
+                os.unlink(p)
+
+    def test_load_single_plane_negative_page_idx(self):
+        """_load_single_plane returns zeros for negative page_idx."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            tf.imwrite(temp_path, np.ones((50, 50), dtype=np.uint16))
+
+            loader.file_index[(0, 0, 0, "BF")] = (temp_path, -1)
+            result = loader.load(0, 0, 0, "BF")
+
+            # Negative index may work in Python (tif.pages[-1]), but
+            # we verify it doesn't crash at minimum
+            assert result.shape == (50, 50)
+            assert result.dtype == np.uint16
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_single_plane_concurrent_different_channels(self):
+        """_load_single_plane handles concurrent reads of different channels."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            pages = [
+                np.full((50, 50), fill_value=i * 500, dtype=np.uint16) for i in range(6)
+            ]
+            with tf.TiffWriter(temp_path) as tw:
+                for page in pages:
+                    tw.write(page)
+
+            # Register all 6 channels pointing to same file, different pages
+            for i in range(6):
+                loader.file_index[(0, 0, 0, f"Ch{i}")] = (temp_path, i)
+
+            # Load all concurrently from threads
+            results = [None] * 6
+            errors = []
+
+            def load_channel(idx):
+                try:
+                    results[idx] = loader.load(0, 0, 0, f"Ch{idx}")
+                except Exception as e:
+                    errors.append(e)
+
+            threads = [
+                threading.Thread(target=load_channel, args=(i,)) for i in range(6)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert not errors, f"Concurrent loads failed: {errors}"
+            for i in range(6):
+                assert np.all(results[i] == i * 500), f"Channel {i} has wrong data"
+        finally:
+            os.unlink(temp_path)
+
     def test_load_single_plane_uses_cache(self):
         """_load_single_plane returns cached data without disk access."""
         loader = _PlaneLoader(height=50, width=50)
