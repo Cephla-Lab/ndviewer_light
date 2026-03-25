@@ -2192,28 +2192,37 @@ class LightweightViewer(QWidget):
         # After the first FOV is displayed, schedule locking contrast limits
         # so subsequent FOVs don't re-autoscale.
         if not self._auto_contrast_done:
+            self._auto_contrast_done = True  # Prevent redundant scheduling
             QTimer.singleShot(500, self._lock_contrast_limits)
 
-    def _lock_contrast_limits(self):
+    def _lock_contrast_limits(self, _retries: int = 3):
         """Lock current contrast limits so subsequent FOVs don't re-autoscale.
 
         Reads the auto-computed clims from each channel and switches them
-        to manual mode with the same values.
+        to manual mode with the same values.  Retries if clims aren't
+        computed yet (data may still be loading).
         """
-        if self._auto_contrast_done or not self.ndv_viewer:
+        if not self.ndv_viewer:
             return
         try:
             from ndv.models._lut_model import ClimsManual
 
             display = self.ndv_viewer._data_model.display
+            all_locked = True
             for key, lut_model in display.luts.items():
                 cached = lut_model.clims.cached_clims
                 if cached is not None:
                     lut_model.clims = ClimsManual(min=cached[0], max=cached[1])
-            self._auto_contrast_done = True
-            logger.info("Contrast limits locked after first FOV")
-        except Exception as e:
-            logger.debug("Could not lock contrast limits: %s", e)
+                else:
+                    all_locked = False
+            if all_locked:
+                logger.info("Contrast limits locked after first FOV")
+            elif _retries > 0:
+                QTimer.singleShot(500, lambda: self._lock_contrast_limits(_retries - 1))
+            else:
+                logger.warning("Could not lock contrast limits: clims not yet computed")
+        except (ImportError, AttributeError) as e:
+            logger.warning("Could not lock contrast limits: %s", e)
 
     def end_acquisition(self):
         """Mark acquisition as ended.
