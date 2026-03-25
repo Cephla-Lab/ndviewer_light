@@ -1484,6 +1484,7 @@ class LightweightViewer(QWidget):
         self._plane_cache = MemoryBoundedLRUCache(PLANE_CACHE_MAX_MEMORY_BYTES)
         self._updating_sliders: bool = False  # Prevent recursive updates
         self._acquisition_active: bool = False  # True during live acquisition
+        self._auto_contrast_done: bool = False  # Lock contrast after first FOV
         self._time_play_timer: Optional[QTimer] = None  # Timer for T slider animation
         self._fov_play_timer: Optional[QTimer] = None  # Timer for FOV slider animation
         self._load_debounce_timer: Optional[QTimer] = (
@@ -1781,6 +1782,7 @@ class LightweightViewer(QWidget):
         self._current_time_idx = 0
         self._max_time_idx = 0
         self._acquisition_active = True
+        self._auto_contrast_done = False
 
         # Update sliders
         self._updating_sliders = True
@@ -2186,6 +2188,32 @@ class LightweightViewer(QWidget):
         if not self._try_inplace_ndv_update(xarr):
             # Fallback: full rebuild (shouldn't happen often)
             self._set_ndv_data(xarr)
+
+        # After the first FOV is displayed, schedule locking contrast limits
+        # so subsequent FOVs don't re-autoscale.
+        if not self._auto_contrast_done:
+            QTimer.singleShot(500, self._lock_contrast_limits)
+
+    def _lock_contrast_limits(self):
+        """Lock current contrast limits so subsequent FOVs don't re-autoscale.
+
+        Reads the auto-computed clims from each channel and switches them
+        to manual mode with the same values.
+        """
+        if self._auto_contrast_done or not self.ndv_viewer:
+            return
+        try:
+            from ndv.models._lut_model import ClimsManual
+
+            display = self.ndv_viewer._data_model.display
+            for key, lut_model in display.luts.items():
+                cached = lut_model.clims.cached_clims
+                if cached is not None:
+                    lut_model.clims = ClimsManual(min=cached[0], max=cached[1])
+            self._auto_contrast_done = True
+            logger.info("Contrast limits locked after first FOV")
+        except Exception as e:
+            logger.debug("Could not lock contrast limits: %s", e)
 
     def end_acquisition(self):
         """Mark acquisition as ended.
