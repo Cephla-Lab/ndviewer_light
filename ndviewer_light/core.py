@@ -2032,15 +2032,11 @@ class LightweightViewer(QWidget):
             else:
                 # Multi-page OME-TIFF: cache the handle to avoid re-parsing
                 # the IFD chain on every page read from the same file.
-                # Lock-free read first (CPython dict.get is atomic under GIL),
-                # only take the lock when creating a new handle.
-                tif = self._tiff_handles.get(filepath)
-                if tif is None:
-                    with self._tiff_handles_lock:
-                        tif = self._tiff_handles.get(filepath)
-                        if tif is None:
-                            tif = tf.TiffFile(filepath)
-                            self._tiff_handles[filepath] = tif
+                with self._tiff_handles_lock:
+                    tif = self._tiff_handles.get(filepath)
+                    if tif is None:
+                        tif = tf.TiffFile(filepath)
+                        self._tiff_handles[filepath] = tif
                 plane = tif.pages[page_idx].asarray()
             self._plane_cache.put(cache_key, plane)
             return plane

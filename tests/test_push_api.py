@@ -524,6 +524,39 @@ class TestLoadSinglePlane:
         finally:
             os.unlink(temp_path)
 
+    def test_load_single_plane_loads_specific_page(self):
+        """_load_single_plane reads the correct page from a multi-page TIFF."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            # Write a multi-page TIFF with 3 distinct pages
+            pages = [
+                np.full((50, 50), fill_value=i * 1000, dtype=np.uint16)
+                for i in range(3)
+            ]
+            with tf.TiffWriter(temp_path) as tw:
+                for page in pages:
+                    tw.write(page)
+
+            # Read page 0
+            loader.file_index[(0, 0, 0, "Ch0")] = (temp_path, 0)
+            assert np.array_equal(loader.load(0, 0, 0, "Ch0"), pages[0])
+
+            # Read page 2
+            loader.file_index[(0, 0, 0, "Ch2")] = (temp_path, 2)
+            assert np.array_equal(loader.load(0, 0, 0, "Ch2"), pages[2])
+
+            # Read page 1
+            loader.file_index[(0, 0, 0, "Ch1")] = (temp_path, 1)
+            assert np.array_equal(loader.load(0, 0, 0, "Ch1"), pages[1])
+        finally:
+            os.unlink(temp_path)
+
     def test_load_single_plane_uses_cache(self):
         """_load_single_plane returns cached data without disk access."""
         loader = _PlaneLoader(height=50, width=50)
