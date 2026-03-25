@@ -2025,17 +2025,23 @@ class LightweightViewer(QWidget):
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            # Cache TiffFile handles to avoid re-parsing the IFD chain on
-            # every page read from the same file (matters for multi-page
-            # OME-TIFFs; negligible overhead for single-page files).
-            # Hold the lock through the page read to prevent concurrent
-            # access to the same TiffFile handle from dask worker threads.
-            with self._tiff_handles_lock:
-                tif = self._tiff_handles.get(filepath)
-                if tif is None:
-                    tif = tf.TiffFile(filepath)
-                    self._tiff_handles[filepath] = tif
-                plane = tif.pages[page_idx].asarray()
+            if page_idx == 0:
+                # Single-page file: open, read, close. No caching to avoid
+                # accumulating thousands of open file descriptors during
+                # acquisitions with one TIFF per plane.
+                with tf.TiffFile(filepath) as tif:
+                    plane = tif.pages[0].asarray()
+            else:
+                # Multi-page OME-TIFF: cache the handle to avoid re-parsing
+                # the IFD chain on every page read from the same file.
+                # Hold the lock through the page read to prevent concurrent
+                # access to the same TiffFile handle from dask worker threads.
+                with self._tiff_handles_lock:
+                    tif = self._tiff_handles.get(filepath)
+                    if tif is None:
+                        tif = tf.TiffFile(filepath)
+                        self._tiff_handles[filepath] = tif
+                    plane = tif.pages[page_idx].asarray()
             self._plane_cache.put(cache_key, plane)
             return plane
         except FileNotFoundError:
