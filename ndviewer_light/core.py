@@ -1840,6 +1840,8 @@ class LightweightViewer(QWidget):
                 For OME-TIFF stacks that store multiple planes per file,
                 specify which page to read.
         """
+        if page_idx < 0:
+            raise ValueError(f"page_idx must be >= 0, got {page_idx}")
         # Update file index (protected by lock for dask worker thread safety)
         with self._file_index_lock:
             self._file_index[(t, fov_idx, z, channel)] = (filepath, page_idx)
@@ -2032,7 +2034,7 @@ class LightweightViewer(QWidget):
             # Global lock is held only for dict bookkeeping; the per-file
             # lock serializes reads to the same file while allowing parallel
             # reads across different files.
-            evicted = []
+            evicted_entries = []
             with self._tiff_handles_lock:
                 entry = self._tiff_handles.get(filepath)
                 if entry is not None:
@@ -2044,10 +2046,13 @@ class LightweightViewer(QWidget):
                     self._tiff_handles[filepath] = (tif, file_lock)
                     # Evict LRU handles if over limit
                     while len(self._tiff_handles) > self._tiff_handles_max:
-                        _, (old_tif, _) = self._tiff_handles.popitem(last=False)
-                        evicted.append(old_tif)
-            # Close evicted handles outside the global lock
-            self._close_tiff_handles(evicted)
+                        _, evicted = self._tiff_handles.popitem(last=False)
+                        evicted_entries.append(evicted)
+            # Close evicted handles: acquire each per-file lock first to
+            # wait for any in-flight readers before closing.
+            for old_tif, old_lock in evicted_entries:
+                with old_lock:
+                    self._close_tiff_handles([old_tif])
             # Read page under per-file lock
             with file_lock:
                 plane = tif.pages[page_idx].asarray()
@@ -2058,10 +2063,13 @@ class LightweightViewer(QWidget):
         except IndexError:
             # Evict and close stale handle so next attempt re-parses the
             # file (the writer may have appended new pages since we opened it).
+            # Acquire per-file lock before closing to wait for any concurrent readers.
             with self._tiff_handles_lock:
                 evicted_entry = self._tiff_handles.pop(filepath, None)
             if evicted_entry is not None:
-                self._close_tiff_handles([evicted_entry[0]])
+                stale_tif, stale_lock = evicted_entry
+                with stale_lock:
+                    self._close_tiff_handles([stale_tif])
             logger.warning(
                 "Page %d not available in %s (file may still be writing)",
                 page_idx,
@@ -2815,9 +2823,12 @@ class LightweightViewer(QWidget):
     def _close_tiff_handle_cache(self):
         """Close cached TiffFile handles used by push-based OME-TIFF loading."""
         with self._tiff_handles_lock:
-            handles = [tif for tif, _ in self._tiff_handles.values()]
+            entries = list(self._tiff_handles.values())
             self._tiff_handles.clear()
-        self._close_tiff_handles(handles)
+        # Acquire each per-file lock before closing to wait for in-flight readers.
+        for tif, file_lock in entries:
+            with file_lock:
+                self._close_tiff_handles([tif])
 
     def closeEvent(self, event):
         """Clean up resources when the widget is closed."""

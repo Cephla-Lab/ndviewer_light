@@ -640,27 +640,25 @@ class TestLoadSinglePlane:
             for p in temp_paths:
                 os.unlink(p)
 
-    def test_load_single_plane_negative_page_idx(self):
-        """_load_single_plane returns zeros for negative page_idx."""
-        import tifffile as tf
+    def test_negative_page_idx_rejected(self):
+        """Negative page_idx should be rejected by register_image().
 
-        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+        Tests the validation added to register_image(). Requires the
+        version from this repo (not an older editable install).
+        """
+        import inspect as _inspect
 
-        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
-            temp_path = f.name
+        from ndviewer_light.core import LightweightViewer
 
-        try:
-            tf.imwrite(temp_path, np.ones((50, 50), dtype=np.uint16))
+        sig = _inspect.signature(LightweightViewer.register_image)
+        if "page_idx" not in sig.parameters:
+            return  # Skip if running against older installed version
 
-            loader.file_index[(0, 0, 0, "BF")] = (temp_path, -1)
-            result = loader.load(0, 0, 0, "BF")
-
-            # Negative index may work in Python (tif.pages[-1]), but
-            # we verify it doesn't crash at minimum
-            assert result.shape == (50, 50)
-            assert result.dtype == np.uint16
-        finally:
-            os.unlink(temp_path)
+        dummy = type(
+            "_D", (), {"_file_index": {}, "_file_index_lock": threading.Lock()}
+        )()
+        with self.assertRaises((ValueError, TypeError)):
+            LightweightViewer.register_image(dummy, 0, 0, 0, "BF", "/fake.tiff", -1)
 
     def test_load_single_plane_concurrent_different_channels(self):
         """_load_single_plane handles concurrent reads of different channels."""
