@@ -2025,24 +2025,24 @@ class LightweightViewer(QWidget):
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            if page_idx == 0:
-                # Single-page file: open, read, close — no caching needed.
-                with tf.TiffFile(filepath) as tif:
-                    plane = tif.pages[0].asarray()
-            else:
-                # Multi-page OME-TIFF: cache the handle to avoid re-parsing
-                # the IFD chain on every page read from the same file.
-                with self._tiff_handles_lock:
-                    tif = self._tiff_handles.get(filepath)
-                    if tif is None:
-                        tif = tf.TiffFile(filepath)
-                        self._tiff_handles[filepath] = tif
-                plane = tif.pages[page_idx].asarray()
+            # Cache TiffFile handles to avoid re-parsing the IFD chain on
+            # every page read from the same file (matters for multi-page
+            # OME-TIFFs; negligible overhead for single-page files).
+            with self._tiff_handles_lock:
+                tif = self._tiff_handles.get(filepath)
+                if tif is None:
+                    tif = tf.TiffFile(filepath)
+                    self._tiff_handles[filepath] = tif
+            plane = tif.pages[page_idx].asarray()
             self._plane_cache.put(cache_key, plane)
             return plane
         except FileNotFoundError:
             logger.warning("Image file not found (may have been deleted): %s", filepath)
         except IndexError:
+            # Evict stale handle so next attempt re-parses the file
+            # (the writer may have appended new pages since we opened it).
+            with self._tiff_handles_lock:
+                self._tiff_handles.pop(filepath, None)
             logger.warning(
                 "Page %d not available in %s (file may still be writing)",
                 page_idx,
@@ -2156,6 +2156,7 @@ class LightweightViewer(QWidget):
         self._acquisition_active = False
         # NOTE: _fov_labels is NOT cleared here - navigation must still work
         # after acquisition ends. Labels are cleared in start_acquisition().
+        self._close_tiff_handle_cache()
         logger.info("NDViewer: Acquisition ended")
 
     # ─────────────────────────────────────────────────────────────────────────
