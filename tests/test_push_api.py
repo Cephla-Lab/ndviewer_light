@@ -654,10 +654,12 @@ class TestLoadSinglePlane:
         if "page_idx" not in sig.parameters:
             return  # Skip if running against older installed version
 
+        import pytest
+
         dummy = type(
             "_D", (), {"_file_index": {}, "_file_index_lock": threading.Lock()}
         )()
-        with self.assertRaises((ValueError, TypeError)):
+        with pytest.raises((ValueError, TypeError)):
             LightweightViewer.register_image(dummy, 0, 0, 0, "BF", "/fake.tiff", -1)
 
     def test_load_single_plane_concurrent_different_channels(self):
