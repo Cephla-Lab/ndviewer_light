@@ -2048,8 +2048,11 @@ class LightweightViewer(QWidget):
                     while len(self._tiff_handles) > self._tiff_handles_max:
                         _, evicted = self._tiff_handles.popitem(last=False)
                         evicted_entries.append(evicted)
-            # Close evicted handles: acquire each per-file lock first to
-            # wait for any in-flight readers before closing.
+            # Close evicted handles.  Safe because LRU eviction only removes
+            # the oldest entry, which the current thread just moved away from
+            # (move_to_end).  For another thread to hold a reference to the
+            # evicted entry, 128+ new files would need to open in the
+            # microseconds between its lookup and file_lock acquire.
             for old_tif, old_lock in evicted_entries:
                 with old_lock:
                     self._close_tiff_handles([old_tif])
@@ -2061,15 +2064,12 @@ class LightweightViewer(QWidget):
         except FileNotFoundError:
             logger.warning("Image file not found (may have been deleted): %s", filepath)
         except IndexError:
-            # Evict and close stale handle so next attempt re-parses the
-            # file (the writer may have appended new pages since we opened it).
-            # Acquire per-file lock before closing to wait for any concurrent readers.
+            # Evict stale entry so next lookup re-opens the file and sees
+            # newly appended pages.  Don't close the handle here — another
+            # thread may still hold a reference and be about to read.  The
+            # handle will be closed at end_acquisition() / closeEvent().
             with self._tiff_handles_lock:
-                evicted_entry = self._tiff_handles.pop(filepath, None)
-            if evicted_entry is not None:
-                stale_tif, stale_lock = evicted_entry
-                with stale_lock:
-                    self._close_tiff_handles([stale_tif])
+                self._tiff_handles.pop(filepath, None)
             logger.warning(
                 "Page %d not available in %s (file may still be writing)",
                 page_idx,
