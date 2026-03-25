@@ -1445,11 +1445,12 @@ class LightweightViewer(QWidget):
         # (t, fov_idx, z, channel) -> (filepath, page_idx)
         self._file_index: Dict[Tuple[int, int, int, str], Tuple[str, int]] = {}
         self._file_index_lock = threading.Lock()
-        # Cache open TiffFile handles to avoid re-parsing IFD chains for
-        # multi-page OME-TIFFs where many planes share the same file.
-        # Bounded to avoid fd exhaustion with thousands of OME-TIFFs.
-        self._tiff_handles: OrderedDict = OrderedDict()
-        self._tiff_handles_lock = threading.Lock()
+        # LRU cache of open TiffFile handles to avoid re-parsing IFD chains.
+        # Each entry is (TiffFile, per-file Lock) so reads to different files
+        # proceed in parallel while same-file reads are serialized.
+        # Bounded to avoid fd exhaustion with thousands of files.
+        self._tiff_handles: OrderedDict = OrderedDict()  # filepath -> (tif, lock)
+        self._tiff_handles_lock = threading.Lock()  # protects the dict itself
         self._tiff_handles_max = 128
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._channel_names: List[str] = []
@@ -2027,32 +2028,29 @@ class LightweightViewer(QWidget):
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            if page_idx == 0:
-                # Single-page file: open, read, close. No caching to avoid
-                # accumulating thousands of open file descriptors during
-                # acquisitions with one TIFF per plane.
-                with tf.TiffFile(filepath) as tif:
-                    plane = tif.pages[0].asarray()
-            else:
-                # Multi-page OME-TIFF: cache the handle to avoid re-parsing
-                # the IFD chain on every page read from the same file.
-                # Hold the lock through the page read to prevent concurrent
-                # access to the same TiffFile handle from dask worker threads.
-                evicted = []
-                with self._tiff_handles_lock:
-                    tif = self._tiff_handles.get(filepath)
-                    if tif is not None:
-                        self._tiff_handles.move_to_end(filepath)
-                    else:
-                        tif = tf.TiffFile(filepath)
-                        self._tiff_handles[filepath] = tif
-                        # Evict LRU handles if over limit
-                        while len(self._tiff_handles) > self._tiff_handles_max:
-                            _, old_tif = self._tiff_handles.popitem(last=False)
-                            evicted.append(old_tif)
-                    plane = tif.pages[page_idx].asarray()
-                # Close evicted handles outside the lock
-                self._close_tiff_handles(evicted)
+            # Look up or create a cached (TiffFile, Lock) entry.
+            # Global lock is held only for dict bookkeeping; the per-file
+            # lock serializes reads to the same file while allowing parallel
+            # reads across different files.
+            evicted = []
+            with self._tiff_handles_lock:
+                entry = self._tiff_handles.get(filepath)
+                if entry is not None:
+                    tif, file_lock = entry
+                    self._tiff_handles.move_to_end(filepath)
+                else:
+                    tif = tf.TiffFile(filepath)
+                    file_lock = threading.Lock()
+                    self._tiff_handles[filepath] = (tif, file_lock)
+                    # Evict LRU handles if over limit
+                    while len(self._tiff_handles) > self._tiff_handles_max:
+                        _, (old_tif, _) = self._tiff_handles.popitem(last=False)
+                        evicted.append(old_tif)
+            # Close evicted handles outside the global lock
+            self._close_tiff_handles(evicted)
+            # Read page under per-file lock
+            with file_lock:
+                plane = tif.pages[page_idx].asarray()
             self._plane_cache.put(cache_key, plane)
             return plane
         except FileNotFoundError:
@@ -2061,9 +2059,9 @@ class LightweightViewer(QWidget):
             # Evict and close stale handle so next attempt re-parses the
             # file (the writer may have appended new pages since we opened it).
             with self._tiff_handles_lock:
-                stale_handle = self._tiff_handles.pop(filepath, None)
-            if stale_handle is not None:
-                self._close_tiff_handles([stale_handle])
+                evicted_entry = self._tiff_handles.pop(filepath, None)
+            if evicted_entry is not None:
+                self._close_tiff_handles([evicted_entry[0]])
             logger.warning(
                 "Page %d not available in %s (file may still be writing)",
                 page_idx,
@@ -2817,7 +2815,7 @@ class LightweightViewer(QWidget):
     def _close_tiff_handle_cache(self):
         """Close cached TiffFile handles used by push-based OME-TIFF loading."""
         with self._tiff_handles_lock:
-            handles = list(self._tiff_handles.values())
+            handles = [tif for tif, _ in self._tiff_handles.values()]
             self._tiff_handles.clear()
         self._close_tiff_handles(handles)
 
