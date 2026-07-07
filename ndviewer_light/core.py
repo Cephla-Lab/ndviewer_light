@@ -4019,7 +4019,21 @@ class LightweightMainWindow(QMainWindow):
 
 def main(dataset_path: str = None):
     """Launch lightweight viewer."""
+    import os
+    import platform
     import sys
+
+    # On Linux Wayland sessions, PyQt5 + vispy (OpenGL) fails to create an EGL
+    # surface ("Could not create EGL surface", "QOpenGLWidget: Failed to make
+    # context current"), so the viewer crashes on startup. Fall back to
+    # XWayland (xcb), which renders reliably, unless the user has already
+    # chosen a Qt platform.
+    if (
+        platform.system() == "Linux"
+        and os.environ.get("WAYLAND_DISPLAY")
+        and "QT_QPA_PLATFORM" not in os.environ
+    ):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
 
     app = QApplication(sys.argv)
 
