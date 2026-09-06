@@ -9,7 +9,7 @@ dependencies:
   - dask
   - xarray
   - superqt
-  - pyqt
+  - qtpy
   - vispy
   - ndv
   - pip

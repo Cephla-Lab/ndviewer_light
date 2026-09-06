@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
-from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPalette
-from PyQt5.QtWidgets import (
+from qtpy.QtCore import QSize, Qt, QTimer, Signal
+from qtpy.QtGui import QColor, QPalette
+from qtpy.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
@@ -43,7 +43,7 @@ try:
 
     SUPERQT_AVAILABLE = True
 except ImportError:
-    from PyQt5.QtWidgets import QSlider
+    from qtpy.QtWidgets import QSlider
 
     SUPERQT_AVAILABLE = False
 
@@ -1403,11 +1403,11 @@ class LightweightViewer(QWidget):
 
     # Signal for thread-safe UI updates from register_image()
     # Signature: (t, fov_idx, _unused1, _unused2) - last two reserved for future use
-    _image_registered = pyqtSignal(int, int, int, int)
+    _image_registered = Signal(int, int, int, int)
 
     # Signal for thread-safe UI updates from notify_zarr_frame()
     # Signature: (t, fov_idx, z, channel_idx)
-    _zarr_frame_registered = pyqtSignal(int, int, int, int)
+    _zarr_frame_registered = Signal(int, int, int, int)
 
     dataset_path: str
     ndv_viewer: Optional["ndv.ArrayViewer"]

@@ -15,7 +15,10 @@ dependencies = [
     "dask",
     "xarray",
     "superqt",
-    "pyqt5",
+    # qtpy, not a concrete binding: Squid runs this viewer embedded in its own process
+    # under PyQt6, and installing a second Qt binding alongside breaks napari/vispy
+    # OpenGL rendering. The host application supplies the binding.
+    "qtpy",
     "vispy",
     "tensorstore",
     "ndv>=0.4.0,<0.5.0",
