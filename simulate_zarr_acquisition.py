@@ -25,8 +25,8 @@ from typing import Optional
 
 import numpy as np
 import tensorstore as ts
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QApplication
+from qtpy.QtCore import QTimer
+from qtpy.QtWidgets import QApplication
 
 from ndviewer_light import LightweightViewer
 

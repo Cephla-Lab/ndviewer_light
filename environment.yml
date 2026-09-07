@@ -10,9 +10,14 @@ dependencies:
   - dask
   - xarray
   - superqt
-  - pyqt
+  - qtpy
   - vispy
   - ndv
   - pip
   - pip:
     - tensorstore
+    # qtpy resolves a binding at import time and raises QtBindingsNotFoundError
+    # without one. Squid supplies PyQt6 when this viewer is embedded; a standalone
+    # env (this file, used by CI and for the simulate_* scripts) has to bring its
+    # own. Installed via pip rather than conda so the binding is unambiguous.
+    - PyQt6
