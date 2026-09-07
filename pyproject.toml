@@ -33,6 +33,11 @@ pythonpath = ["."]
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest"]
+# qtpy is a shim, so a standalone install (running the simulate_* scripts, or this
+# project's own test suite) still needs a real binding. Embedded in Squid the host
+# already provides one, which is why this is an extra rather than a hard dependency:
+# `pip install .[pyqt6]`, mirroring how napari ships napari[pyqt6].
+pyqt6 = ["PyQt6"]
 
 [tool.ruff]
 line-length = 100
