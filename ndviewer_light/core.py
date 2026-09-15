@@ -534,6 +534,155 @@ FPATTERN = re.compile(
 FPATTERN_OME = re.compile(r"(?P<r>[^_]+)_(?P<f>\d+)\.ome\.tiff?", re.IGNORECASE)
 
 
+def _timepoint_dirs(base_path: Path) -> List[Path]:
+    """Timepoint folders directly under an acquisition, sorted numerically.
+
+    Squid pads the folder name with FILE_ID_PADDING, so both "0"/"1"/"2" and
+    "00000"/"00001"/"00002" occur; any all-digit directory counts.
+
+    Raises OSError if `base_path` cannot be listed, as the callers' own
+    error handling expects.
+    """
+    dirs = [d for d in base_path.iterdir() if d.is_dir() and d.name.isdigit()]
+    return sorted(dirs, key=lambda d: int(d.name))
+
+
+def _has_ome_files(directory: Path) -> bool:
+    """True when `directory` holds at least one *.ome.tif/*.ome.tiff file."""
+    try:
+        return any(".ome" in f.name for f in directory.glob("*.tif*"))
+    except OSError as e:
+        logger.debug("Failed to scan %s for OME-TIFF files: %s", directory, e)
+        return False
+
+
+def resolve_ome_tiff_dirs(base_path: Path) -> Tuple[List[Tuple[int, Path]], bool]:
+    """Locate the folder(s) holding an acquisition's OME-TIFF stacks.
+
+    Squid writes OME-TIFF in one of two layouts:
+
+    * unsplit - ``<base>/ome_tiff/<region>_<fov>.ome.tiff``, one stack per FOV
+      holding every timepoint (SizeT = number of timepoints);
+    * split - ``<base>/<t>/ome_tiff/<region>_<fov>.ome.tiff``, one stack per
+      FOV per timepoint (SizeT = 1). Splitting is opt-in and exists so that
+      finished timepoints can be offloaded while the run is still going.
+
+    Returns:
+        ``(entries, is_split)`` where `entries` is a list of
+        ``(timepoint index, directory)`` sorted by timepoint. The unsplit
+        layout yields a single entry with timepoint index 0 whose files carry
+        the whole T axis, and `is_split` False.
+    """
+    ome_dir = base_path / "ome_tiff"
+    if ome_dir.is_dir():
+        return [(0, ome_dir)], False
+
+    tp_dirs = _timepoint_dirs(base_path)
+    split = [
+        (int(d.name), d / "ome_tiff") for d in tp_dirs if _has_ome_files(d / "ome_tiff")
+    ]
+    if split:
+        return split, True
+
+    # Legacy fallback: *.ome.tif* written straight into a timepoint folder, or
+    # into the dataset folder itself.
+    if tp_dirs:
+        return [(0, tp_dirs[0])], False
+    return [(0, base_path)], False
+
+
+def _zcyx_shape(axes: str, shape: Tuple[int, ...]) -> Tuple[int, int, int, int]:
+    """(Z, C, Y, X) sizes of a single-timepoint OME series.
+
+    tifffile squeezes size-1 dimensions out of ``series.axes``, so a SizeT=1
+    file may report "TZCYX", "ZCYX", "CYX" or plain "YX". Any axis other than
+    Z/C/Y/X (notably a retained T) must therefore be a singleton.
+    """
+    axes = axes.upper()
+    if len(axes) != len(shape) or len(set(axes)) != len(axes):
+        raise ValueError(f"axes {axes!r} do not describe shape {shape}")
+    for ax, size in zip(axes, shape):
+        if ax not in "ZCYX" and size != 1:
+            raise ValueError(f"non-singleton {ax!r} axis of size {size}")
+    sizes = dict(zip(axes, shape))
+    if "Y" not in sizes or "X" not in sizes:
+        raise ValueError(f"axes {axes!r} lack Y/X")
+    return sizes.get("Z", 1), sizes.get("C", 1), sizes["Y"], sizes["X"]
+
+
+def _reshape_to_zcyx(arr, axes: str):
+    """Reorder a lazy single-timepoint OME array into (Z, C, Y, X).
+
+    Drops singleton axes that are not Z/C/Y/X and inserts singleton Z/C axes
+    that tifffile squeezed away. Call `_zcyx_shape` first to validate.
+    """
+    axes = axes.upper()
+    i = 0
+    while i < len(axes):
+        if axes[i] in "ZCYX":
+            i += 1
+            continue
+        arr = arr[(slice(None),) * i + (0,)]
+        axes = axes[:i] + axes[i + 1 :]
+    for ax in "ZC":
+        if ax not in axes:
+            arr = arr[None]
+            axes = ax + axes
+    return arr.transpose([axes.index(ax) for ax in "ZCYX"])
+
+
+def extract_ome_channel_names(ome_metadata: str) -> List[str]:
+    """Channel names from OME-XML; empty list when absent or unparseable."""
+    names: List[str] = []
+    if not ome_metadata:
+        return names
+    try:
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(ome_metadata)
+        ns = {"ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"}
+        for ch in root.findall(".//ome:Channel", ns):
+            name = ch.get("Name") or ch.get("ID", "")
+            if name:
+                names.append(name)
+    except Exception as e:
+        logger.debug("Failed to parse OME channel names: %s", e)
+    return names
+
+
+def _normalize_channel_names(channel_names: List[str], n_c: int) -> List[str]:
+    """Pad with Ch<i> / truncate so the name list matches the channel count."""
+    names = list(channel_names)
+    if not names:
+        return [f"Ch{i}" for i in range(n_c)]
+    if len(names) < n_c:
+        names.extend(f"Ch{i}" for i in range(len(names), n_c))
+    elif len(names) > n_c:
+        names = names[:n_c]
+    return names
+
+
+def _apply_pixel_size_attrs(
+    xarr: "xr.DataArray",
+    pixel_size_x: Optional[float],
+    pixel_size_y: Optional[float],
+    pixel_size_z: Optional[float],
+) -> None:
+    """Store physical pixel sizes (micrometers) on a loaded DataArray."""
+    if pixel_size_x is not None:
+        xarr.attrs["pixel_size_x_um"] = pixel_size_x
+    if pixel_size_y is not None:
+        xarr.attrs["pixel_size_y_um"] = pixel_size_y
+    if pixel_size_z is not None:
+        xarr.attrs["pixel_size_z_um"] = pixel_size_z
+    # Also store commonly used aliases
+    if pixel_size_x is not None and pixel_size_y is not None:
+        # Use average for isotropic XY pixel size
+        xarr.attrs["pixel_size_um"] = (pixel_size_x + pixel_size_y) / 2
+    if pixel_size_z is not None:
+        xarr.attrs["dz_um"] = pixel_size_z
+
+
 # Helper functions
 def extract_wavelength(channel_str: str):
     """Extract wavelength (nm) from channel string; None if unknown."""
@@ -648,6 +797,37 @@ def extract_ome_physical_sizes(
         logger.debug("Failed to extract physical sizes from OME metadata: %s", e)
 
     return None, None, None
+
+
+def _read_split_ome_reference(path: str) -> Optional[Dict[str, Any]]:
+    """Plane geometry, dtype and OME metadata of one split OME-TIFF file.
+
+    Returns None (after logging) when the file cannot be read or its axes are
+    not a single-timepoint ZCYX stack, so the caller can try the next file.
+    """
+    try:
+        with tf.TiffFile(path) as tif:
+            series = tif.series[0]
+            axes = str(series.axes)
+            shape = tuple(int(s) for s in series.shape)
+            dtype = np.dtype(series.dtype)
+            ome_metadata = tif.ome_metadata
+    except Exception as e:
+        logger.warning("Skipping unreadable OME-TIFF %s: %s", path, e)
+        return None
+
+    try:
+        zcyx = _zcyx_shape(axes, shape)
+    except ValueError as e:
+        logger.warning("Skipping OME-TIFF %s with unexpected axes: %s", path, e)
+        return None
+
+    return {
+        "zcyx": zcyx,
+        "dtype": dtype,
+        "channel_names": extract_ome_channel_names(ome_metadata),
+        "pixel_sizes": extract_ome_physical_sizes(ome_metadata),
+    }
 
 
 def read_acquisition_parameters(
@@ -846,7 +1026,9 @@ def detect_format(base_path: Path) -> str:
     - zarr/ directory with .zarr or .ome.zarr subdirectories
     - base_path itself being a .zarr/.ome.zarr directory with zarr.json
 
-    OME-TIFF is detected by .ome.tif* files.
+    OME-TIFF is detected by .ome.tif* files, either under ome_tiff/ or - for a
+    run split by timepoint - under <t>/ome_tiff/. Both report "ome_tiff"; the
+    layout is resolved later by resolve_ome_tiff_dirs().
     Falls back to single_tiff if neither is detected.
     """
     # Check for zarr v3 formats
@@ -874,18 +1056,17 @@ def detect_format(base_path: Path) -> str:
         if (base_path / "zarr.json").exists():
             return "zarr_v3"
 
-    # Check for OME-TIFF
-    ome_dir = base_path / "ome_tiff"
-    if ome_dir.exists():
-        if any(".ome" in f.name for f in ome_dir.glob("*.tif*")):
-            return "ome_tiff"
+    # Check for OME-TIFF: either one stack per FOV under ome_tiff/, or - for a
+    # run split by timepoint so finished timepoints can be offloaded - one
+    # stack per FOV per timepoint under <t>/ome_tiff/.
+    if _has_ome_files(base_path / "ome_tiff"):
+        return "ome_tiff"
 
-    first_tp = next(
-        (d for d in base_path.iterdir() if d.is_dir() and d.name.isdigit()), None
-    )
-    if first_tp:
-        if any(".ome" in f.name for f in first_tp.glob("*.tif*")):
-            return "ome_tiff"
+    tp_dirs = _timepoint_dirs(base_path)
+    if any(_has_ome_files(d / "ome_tiff") for d in tp_dirs):
+        return "ome_tiff"
+    if tp_dirs and _has_ome_files(tp_dirs[0]):
+        return "ome_tiff"
     return "single_tiff"
 
 
@@ -2952,12 +3133,33 @@ class LightweightViewer(QWidget):
             return (fmt, max(t_vals), len(fov_set), latest_file_count)
 
         # ome_tiff
-        ome_dir = base / "ome_tiff"
-        if not ome_dir.exists():
-            ome_dir = next(
-                (d for d in base.iterdir() if d.is_dir() and d.name.isdigit()), base
+        entries, is_split = resolve_ome_tiff_dirs(base)
+        if is_split:
+            # T is the number of timepoint folders, not SizeT inside a file
+            # (always 1 when split), so re-scan the folders. Only the newest
+            # one is globbed, to keep polling cheap on long runs; timepoints
+            # being offloaded show up in the folder count.
+            latest_files = sorted(entries[-1][1].glob("*.ome.tif*"))
+            st = None
+            if latest_files:
+                try:
+                    st = latest_files[0].stat()
+                except OSError as e:
+                    logger.debug("Failed to stat OME file: %s", e)
+            return (
+                fmt,
+                True,
+                len(entries),
+                len(latest_files),
+                st.st_size if st is not None else 0,
+                (
+                    getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+                    if st is not None
+                    else 0
+                ),
             )
 
+        ome_dir = entries[0][1]
         ome_files = sorted(ome_dir.glob("*.ome.tif*"))
         n_ome = len(ome_files)
         t_len = -1
@@ -3268,15 +3470,14 @@ class LightweightViewer(QWidget):
         fov_set = set()
 
         if fmt == "ome_tiff":
-            ome_dir = base_path / "ome_tiff"
-            if not ome_dir.exists():
-                ome_dir = next(
-                    (d for d in base_path.iterdir() if d.is_dir() and d.name.isdigit()),
-                    base_path,
-                )
-            for f in ome_dir.glob("*.ome.tif*"):
-                if m := FPATTERN_OME.search(f.name):
-                    fov_set.add((m.group("r"), int(m.group("f"))))
+            # Union across timepoint folders: in a split run a FOV may be
+            # absent from some timepoints (it started later, or that timepoint
+            # was offloaded), and is blank there rather than missing entirely.
+            entries, _ = resolve_ome_tiff_dirs(base_path)
+            for _, ome_dir in entries:
+                for f in ome_dir.glob("*.ome.tif*"):
+                    if m := FPATTERN_OME.search(f.name):
+                        fov_set.add((m.group("r"), int(m.group("f"))))
         else:
             first_tp = next(
                 (d for d in base_path.iterdir() if d.is_dir() and d.name.isdigit()),
@@ -3294,12 +3495,10 @@ class LightweightViewer(QWidget):
     ) -> "Optional[xr.DataArray]":
         """Fast OME-TIFF: mmap via tifffile.aszarr, small chunks, no big graphs."""
         try:
-            ome_dir = base_path / "ome_tiff"
-            if not ome_dir.exists():
-                ome_dir = next(
-                    (d for d in base_path.iterdir() if d.is_dir() and d.name.isdigit()),
-                    base_path,
-                )
+            entries, is_split = resolve_ome_tiff_dirs(base_path)
+            if is_split:
+                return self._load_ome_tiff_split(base_path, fovs, entries)
+            ome_dir = entries[0][1]
 
             file_index = {}
             for f in ome_dir.glob("*.ome.tif*"):
@@ -3323,17 +3522,7 @@ class LightweightViewer(QWidget):
                 pixel_size_x, pixel_size_y, pixel_size_z = None, None, None
                 try:
                     if tif.ome_metadata:
-                        import xml.etree.ElementTree as ET
-
-                        root = ET.fromstring(tif.ome_metadata)
-                        ns = {
-                            "ome": "http://www.openmicroscopy.org/Schemas/OME/2016-06"
-                        }
-                        for ch in root.findall(".//ome:Channel", ns):
-                            name = ch.get("Name") or ch.get("ID", "")
-                            if name:
-                                channel_names.append(name)
-
+                        channel_names = extract_ome_channel_names(tif.ome_metadata)
                         # Extract physical pixel sizes
                         pixel_size_x, pixel_size_y, pixel_size_z = (
                             extract_ome_physical_sizes(tif.ome_metadata)
@@ -3344,12 +3533,7 @@ class LightweightViewer(QWidget):
             axis_map = {"T": "time", "Z": "z", "C": "channel", "Y": "y", "X": "x"}
             dims_base = [axis_map.get(ax, f"ax_{ax}") for ax in axes]
             # Build channel name list - prefer extracted names, fill/truncate to match n_c
-            if not channel_names:
-                channel_names = [f"Ch{i}" for i in range(n_c)]
-            elif len(channel_names) < n_c:
-                channel_names.extend(f"Ch{i}" for i in range(len(channel_names), n_c))
-            elif len(channel_names) > n_c:
-                channel_names = channel_names[:n_c]
+            channel_names = _normalize_channel_names(channel_names, n_c)
             # Keep coordinates numeric (indices) for all axes, including "channel";
             # channel names are stored in attrs and applied via _lut_controllers.
             # This convention is used consistently for both OME-TIFF and single-TIFF paths.
@@ -3414,20 +3598,7 @@ class LightweightViewer(QWidget):
             xarr.attrs["luts"] = luts
             xarr.attrs["channel_names"] = channel_names
             xarr.attrs["_open_tifs"] = tifs_kept
-
-            # Store physical pixel sizes (in micrometers)
-            if pixel_size_x is not None:
-                xarr.attrs["pixel_size_x_um"] = pixel_size_x
-            if pixel_size_y is not None:
-                xarr.attrs["pixel_size_y_um"] = pixel_size_y
-            if pixel_size_z is not None:
-                xarr.attrs["pixel_size_z_um"] = pixel_size_z
-            # Also store commonly used aliases
-            if pixel_size_x is not None and pixel_size_y is not None:
-                # Use average for isotropic XY pixel size
-                xarr.attrs["pixel_size_um"] = (pixel_size_x + pixel_size_y) / 2
-            if pixel_size_z is not None:
-                xarr.attrs["dz_um"] = pixel_size_z
+            _apply_pixel_size_attrs(xarr, pixel_size_x, pixel_size_y, pixel_size_z)
 
             return xarr
         except Exception as e:
@@ -3436,6 +3607,124 @@ class LightweightViewer(QWidget):
 
             traceback.print_exc()
             return None
+
+    def _open_split_ome_stack(
+        self, path: str, ref: Dict[str, Any], tifs_kept: List[Any]
+    ):
+        """Lazy (1, Z, C, Y, X) view of one split OME-TIFF, None if unusable.
+
+        The file may be gone (an offload tool can move a finished timepoint
+        away while the dataset is open) or malformed; both are logged and the
+        caller substitutes blank planes, as the single-TIFF path does for a
+        missing plane file.
+        """
+        try:
+            tif = tf.TiffFile(path)
+        except Exception as e:
+            logger.warning("OME-TIFF unavailable, using blank planes: %s (%s)", path, e)
+            return None
+        try:
+            series = tif.series[0]
+            axes = str(series.axes)
+            shape = tuple(int(s) for s in series.shape)
+            zcyx = _zcyx_shape(axes, shape)
+            dtype = np.dtype(series.dtype)
+            if zcyx != ref["zcyx"] or dtype != ref["dtype"]:
+                raise ValueError(
+                    f"ZCYX {zcyx}/{dtype} does not match {ref['zcyx']}/{ref['dtype']}"
+                )
+            zarr_store = series.aszarr()
+        except Exception as e:
+            logger.warning("Skipping malformed OME-TIFF %s: %s", path, e)
+            tif.close()
+            return None
+
+        # keep tif open to support mmap; rely on Python GC after viewer closes
+        tifs_kept.append(tif)
+        # Per-axis chunking: 1 for non-spatial, full for spatial
+        chunks = tuple(dim if ax in ("X", "Y") else 1 for ax, dim in zip(axes, shape))
+        arr = da.from_zarr(zarr_store, chunks=chunks)
+        return _reshape_to_zcyx(arr, axes)[None]
+
+    def _load_ome_tiff_split(
+        self, base_path: Path, fovs: List[Dict], entries: List[Tuple[int, Path]]
+    ) -> "Optional[xr.DataArray]":
+        """OME-TIFF split per timepoint: <base>/<t>/ome_tiff/<region>_<fov>.ome.tiff.
+
+        Each file holds a single timepoint (SizeT = 1), so the T axis is
+        rebuilt by concatenating the per-timepoint files, which keeps the whole
+        run browsable as one dataset. Files are mmapped exactly as in the
+        unsplit path; a timepoint with no file for a FOV contributes blanks.
+        """
+        # (timepoint, region, fov) -> path
+        file_index: Dict[Tuple[int, str, int], str] = {}
+        times: List[int] = []
+        for t, ome_dir in entries:
+            found = False
+            for f in ome_dir.glob("*.ome.tif*"):
+                if m := FPATTERN_OME.search(f.name):
+                    file_index[(t, m.group("r"), int(m.group("f")))] = str(f)
+                    found = True
+            if found:
+                times.append(t)
+        if not file_index:
+            return None
+
+        # Channel names, pixel sizes and the plane geometry come from the first
+        # readable file, as in the unsplit path.
+        ref = None
+        for key in sorted(file_index):
+            ref = _read_split_ome_reference(file_index[key])
+            if ref is not None:
+                break
+        if ref is None:
+            logger.warning("No readable OME-TIFF in split dataset %s", base_path)
+            return None
+
+        n_z, n_c, height, width = ref["zcyx"]
+        dtype = ref["dtype"]
+        channel_names = _normalize_channel_names(ref["channel_names"], n_c)
+        luts = {
+            i: wavelength_to_colormap(extract_wavelength(name))
+            for i, name in enumerate(channel_names)
+        }
+
+        blank = da.zeros((1, n_z, n_c, height, width), dtype=dtype)
+        tifs_kept: List[Any] = []
+        fov_arrays = []
+        for fov_info in fovs:
+            region, fov = fov_info["region"], fov_info["fov"]
+            per_timepoint = []
+            for t in times:
+                path = file_index.get((t, region, fov))
+                stack = (
+                    None
+                    if path is None
+                    else self._open_split_ome_stack(path, ref, tifs_kept)
+                )
+                per_timepoint.append(blank if stack is None else stack)
+            fov_arrays.append(da.concatenate(per_timepoint, axis=0))
+
+        # (time, fov, z, channel, y, x)
+        full_array = da.stack(fov_arrays, axis=1)
+
+        xarr = xr.DataArray(
+            full_array,
+            dims=["time", "fov", "z", "channel", "y", "x"],
+            # Time carries the real timepoint indices (folder names), as the
+            # single-TIFF path does; the others stay numeric indices.
+            coords={
+                "time": times,
+                "fov": list(range(len(fovs))),
+                "z": list(range(n_z)),
+                "channel": list(range(n_c)),
+            },
+        )
+        xarr.attrs["luts"] = luts
+        xarr.attrs["channel_names"] = channel_names
+        xarr.attrs["_open_tifs"] = tifs_kept
+        _apply_pixel_size_attrs(xarr, *ref["pixel_sizes"])
+        return xarr
 
     def _load_single_tiff(
         self, base_path: Path, fovs: List[Dict]
