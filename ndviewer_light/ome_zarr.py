@@ -9,10 +9,15 @@ from typing import Dict, List, Optional
 logger = logging.getLogger("ndviewer_light.ome_zarr")
 
 _UM_PER_UNIT = {
+    "angstrom": 1e-4,
+    "picometer": 1e-6,
     "nanometer": 1e-3,
     "micrometer": 1.0,
     "millimeter": 1e3,
+    "centimeter": 1e4,
+    "decimeter": 1e5,
     "meter": 1e6,
+    "kilometer": 1e9,
 }
 _FOV_NAMES = {"position", "p", "fov"}
 _SPACE_BY_ORDER_FROM_END = ["x", "y", "z"]

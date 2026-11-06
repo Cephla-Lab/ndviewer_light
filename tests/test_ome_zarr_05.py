@@ -12,7 +12,7 @@ from ndviewer_light.ome_zarr import (
     parse_image,
     read_node_attrs,
 )
-from tests.ome_zarr_fixtures import SQUID_AXES, write_image_group
+from tests.ome_zarr_fixtures import SQUID_AXES, write_image_group, write_plate
 
 
 def _space(name):
@@ -186,3 +186,36 @@ class TestParseImage:
         ]
         write_image_group(tmp_path / "j", (1, 2, 3, 8, 8), SQUID_AXES)
         assert array_dimension_names(parse_image(tmp_path / "j")) is None
+
+
+class TestUnitsAndPlateFixture:
+    def test_centimetre_axes_convert_to_micrometres(self, tmp_path):
+        axes = [{"name": n, "type": "space", "unit": "centimeter"} for n in "zyx"]
+        write_image_group(
+            tmp_path / "i",
+            (3, 8, 8),
+            axes,
+            scale={"z": 0.0001, "y": 0.0001, "x": 0.0001},
+            omero=False,
+        )
+        image = parse_image(tmp_path / "i")
+        assert image.scale_um == pytest.approx({"z": 1.0, "y": 1.0, "x": 1.0})
+
+    def test_unknown_unit_is_an_error_naming_it(self, tmp_path):
+        axes = [{"name": n, "type": "space", "unit": "furlong"} for n in "zyx"]
+        write_image_group(tmp_path / "i", (3, 8, 8), axes, omero=False)
+        with pytest.raises(OmeZarrError, match="furlong"):
+            parse_image(tmp_path / "i")
+
+    def test_write_plate_accepts_well_ids_and_integer_columns(self, tmp_path):
+        write_plate(
+            tmp_path / "p", {"D5": [0], "B3": [0, 1]}, rows=["B", "D"], cols=[3, 5]
+        )
+        plate = read_node_attrs(tmp_path / "p")["ome"]["plate"]
+        assert sorted(plate["wells"], key=lambda w: w["path"]) == [
+            {"path": "B/3", "rowIndex": 0, "columnIndex": 0},
+            {"path": "D/5", "rowIndex": 1, "columnIndex": 1},
+        ]
+        assert plate["columns"] == [{"name": "3"}, {"name": "5"}]
+        for image in ("B/3/0", "B/3/1", "D/5/0"):
+            assert (tmp_path / "p" / image / "zarr.json").exists()

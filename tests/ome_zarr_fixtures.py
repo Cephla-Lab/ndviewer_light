@@ -1,6 +1,7 @@
 """Helpers that write small OME-Zarr 0.5 stores for tests."""
 
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -146,37 +147,43 @@ def write_plate(
     cols: list,
     **image_kwargs,
 ) -> None:
-    """Write a plate. wells maps "A/1" (row/column) to its list of field indices."""
+    """Write a plate. wells maps a well id ("B3") to its list of field indices."""
     root = Path(root)
-    well_entries = []
-    for well_path in wells:
-        row, col = well_path.split("/")
-        well_entries.append(
-            {
-                "path": well_path,
-                "rowIndex": list(rows).index(row),
-                "columnIndex": list(cols).index(col),
-            }
-        )
+    row_names = [str(r) for r in rows]
+    col_names = [str(c) for c in cols]
+    well_paths = {}
+    for well_id in wells:
+        match = re.fullmatch(r"([A-Za-z]+)(\d+)", well_id)
+        if match is None:
+            raise ValueError(f"Bad well id {well_id!r}")
+        well_paths[well_id] = (match.group(1), str(int(match.group(2))))
+    well_entries = [
+        {
+            "path": f"{row}/{col}",
+            "rowIndex": row_names.index(row),
+            "columnIndex": col_names.index(col),
+        }
+        for row, col in well_paths.values()
+    ]
     _write_group(
         root,
         {
             "ome": {
                 "version": "0.5",
                 "plate": {
-                    "rows": [{"name": r} for r in rows],
-                    "columns": [{"name": c} for c in cols],
+                    "rows": [{"name": r} for r in row_names],
+                    "columns": [{"name": c} for c in col_names],
                     "wells": well_entries,
                 },
             }
         },
     )
-    for row in sorted({w.split("/")[0] for w in wells}):
+    for row in sorted({row for row, _ in well_paths.values()}):
         _write_group(root / row, {})
-    for well_path, fields in wells.items():
+    for well_id, fields in wells.items():
+        row, col = well_paths[well_id]
+        well_dir = root / row / col
         images = [{"path": str(f)} for f in fields]
-        _write_group(
-            root / well_path, {"ome": {"version": "0.5", "well": {"images": images}}}
-        )
+        _write_group(well_dir, {"ome": {"version": "0.5", "well": {"images": images}}})
         for f in fields:
-            write_image_group(root / well_path / str(f), **image_kwargs)
+            write_image_group(well_dir / str(f), **image_kwargs)
