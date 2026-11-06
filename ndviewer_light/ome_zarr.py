@@ -289,18 +289,30 @@ def _relative(path: Path, root: Path) -> str:
 def _discover_plate(plate_dir: Path, plate: dict):
     rows = [r.get("name", "") for r in plate.get("rows", [])]
     columns = [c.get("name", "") for c in plate.get("columns", [])]
-    wells = sorted(
-        plate.get("wells", []),
-        key=lambda w: (w.get("rowIndex", 0), w.get("columnIndex", 0)),
-    )
+    try:
+        wells = sorted(
+            plate.get("wells", []),
+            key=lambda w: (w["rowIndex"], w["columnIndex"]),
+        )
+    except (KeyError, TypeError) as exc:
+        raise OmeZarrError(
+            f"{plate_dir}: plate well lacks rowIndex/columnIndex ({exc!r})"
+        ) from exc
     skipped: List[str] = []
     entries = []
     for well in wells:
-        well_dir = plate_dir / well["path"]
+        try:
+            well_path = well["path"]
+            region = rows[well["rowIndex"]] + columns[well["columnIndex"]]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise OmeZarrError(
+                f"{plate_dir}: well {well.get('path')!r} has an invalid path, "
+                f"rowIndex or columnIndex ({exc!r})"
+            ) from exc
+        well_dir = plate_dir / well_path
         if not well_dir.is_dir():
             skipped.append(_relative(well_dir, plate_dir))
             continue
-        region = rows[well["rowIndex"]] + columns[well["columnIndex"]]
         entries.extend(_well_fields(well_dir, region, skipped, plate_dir))
     _warn_skipped(plate_dir, skipped)
     return entries
@@ -362,7 +374,7 @@ def discover_ome_zarr(root: Path) -> Tuple[List[dict], str]:
         return _discover_plate(root, ome["plate"]), "hcs_plate"
     if "well" in ome:
         skipped: List[str] = []
-        region = root.parent.parent.name + root.name
+        region = root.parent.name + root.name
         entries = _well_fields(root, region, skipped, root)
         _warn_skipped(root, skipped)
         return entries, "hcs_plate"

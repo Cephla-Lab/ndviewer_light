@@ -276,6 +276,16 @@ class TestDiscover:
         write_plate(tmp_path / "p", {"B3": [0, 1]}, rows=["B"], cols=[3])
         fovs, structure = discover_ome_zarr(tmp_path / "p" / "B" / "3")
         assert structure == "hcs_plate" and [f["fov"] for f in fovs] == [0, 1]
+        assert [f["region"] for f in fovs] == ["B3", "B3"]
+
+    def test_well_row_index_out_of_range_is_an_omezarrerror(self, tmp_path):
+        write_plate(tmp_path / "p", {"B3": [0]}, rows=["B", "D"], cols=[3])
+        zarr_json = tmp_path / "p" / "zarr.json"
+        node = json.loads(zarr_json.read_text())
+        node["attributes"]["ome"]["plate"]["wells"][0]["rowIndex"] = 5
+        zarr_json.write_text(json.dumps(node))
+        with pytest.raises(OmeZarrError, match=r"p.*B/3"):
+            discover_ome_zarr(tmp_path / "p")
 
     def test_single_image_group(self, tmp_path):
         write_image_group(tmp_path / "img.ome.zarr", (1, 2, 3, 8, 8), SQUID_AXES)
