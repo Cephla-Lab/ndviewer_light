@@ -6,7 +6,9 @@ import shutil
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+import tifffile  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 from ndviewer_light import LightweightViewer, detect_format  # noqa: E402
@@ -136,6 +138,8 @@ def test_6d_layout_loads(qapp, tmp_path):
     )
     v = load(qapp, tmp_path / "run")
     assert dict(v._xarray_data.sizes)["fov"] == 2
+    assert v._fov_labels == ["r:0", "r:1"]
+    assert v.get_fov_list() == [{"region": "r", "fov": 0}, {"region": "r", "fov": 1}]
 
 
 def test_legacy_layout_still_loads(qapp, tmp_path):
@@ -167,3 +171,71 @@ def test_refresh_reports_loader_errors(qapp, tmp_path):
     shutil.rmtree(tmp_path / "p" / "B" / "3" / "1" / "0")
     v.refresh()  # must not raise
     assert v.status_label.text().startswith("Error:")
+
+
+_FOV_AXES = [{"name": "fov", "type": "fov"}] + SQUID_AXES
+_6D_NAMES = ["fov", "t", "c", "z", "y", "x"]
+
+
+def _write_6d_region(run, region, shape):
+    write_image_group(
+        run / "zarr" / region / "acquisition.zarr",
+        shape,
+        _FOV_AXES,
+        dataset_path=".",
+        node_type="array",
+        dimension_names=_6D_NAMES,
+    )
+
+
+def test_6d_two_regions_concatenate_along_fov(qapp, tmp_path):
+    _write_6d_region(tmp_path / "run", "r1", (2, 1, 2, 3, 8, 8))
+    _write_6d_region(tmp_path / "run", "r2", (3, 1, 2, 3, 8, 8))
+    v = load(qapp, tmp_path / "run")
+    assert dict(v._xarray_data.sizes)["fov"] == 5
+    assert v._fov_labels == ["r1:0", "r1:1", "r2:0", "r2:1", "r2:2"]
+    assert int(
+        v._xarray_data.isel(time=0, fov=2, z=1, channel=1, y=0, x=0).values
+    ) == plane_value(1, 1)
+    assert [e["region"] for e in v.get_fov_list()] == ["r1"] * 2 + ["r2"] * 3
+
+
+def test_6d_regions_with_different_shapes_fail(qapp, tmp_path):
+    _write_6d_region(tmp_path / "run", "r1", (2, 1, 2, 3, 8, 8))
+    _write_6d_region(tmp_path / "run", "r2", (2, 1, 2, 3, 4, 4))
+    v = load(qapp, tmp_path / "run")
+    assert v._xarray_data is None
+    assert v.status_label.text().startswith("Error:")
+    assert "r1" in v.status_label.text() and "r2" in v.status_label.text()
+
+
+def test_go_to_well_fov_is_false_in_pull_mode(qapp, tmp_path):
+    write_plate(tmp_path / "p", {"B3": [0, 1]}, rows=["B"], cols=[3])
+    v = load(qapp, tmp_path / "p")
+    assert v.go_to_well_fov("B3", 1) is False
+
+
+def test_failed_refresh_keeps_previous_labels_and_data(qapp, tmp_path):
+    write_plate(tmp_path / "p", {"B3": [0, 1]}, rows=["B"], cols=[3])
+    v = load(qapp, tmp_path / "p")
+    previous = v._xarray_data
+    shutil.rmtree(tmp_path / "p" / "B" / "3" / "1" / "0")
+    v.refresh()
+    assert v.status_label.text().startswith("Error:")
+    assert v._fov_labels == ["B3:0", "B3:1"]
+    assert v._xarray_data is previous
+
+
+def test_tiff_load_after_zarr_clears_labels(qapp, tmp_path):
+    write_plate(tmp_path / "p", {"B3": [0, 1]}, rows=["B"], cols=[3])
+    tiff_dir = tmp_path / "tiffs" / "0"
+    tiff_dir.mkdir(parents=True)
+    for channel in ("BF", "DAPI"):
+        tifffile.imwrite(
+            str(tiff_dir / f"A1_0_0_{channel}.tiff"), np.zeros((8, 8), np.uint16)
+        )
+    v = load(qapp, tmp_path / "p")
+    assert v._fov_labels == ["B3:0", "B3:1"]
+    v.load_dataset(str(tmp_path / "tiffs"))
+    assert v._xarray_data is not None
+    assert v._fov_labels == []

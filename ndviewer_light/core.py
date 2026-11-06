@@ -1299,6 +1299,31 @@ def _discover_zarr_images(base_path: Path) -> Tuple[List[Dict], str, bool]:
     return fovs, structure, True
 
 
+def _image_shape(image: OmeZarrImage) -> tuple:
+    """Shape of an image's full-resolution array."""
+    ts_arr = open_zarr_tensorstore(image.group, image.array_path)
+    if ts_arr is None:
+        raise RuntimeError(f"cannot open {image.array_dir}")
+    return tuple(ts_arr.shape)
+
+
+def _fov_entries(fovs: List[Dict], structure: str) -> List[Dict]:
+    """One {"region", "fov"} per FOV of the loaded array, in array order.
+
+    In a "6d" layout each region image holds several FOVs along its fov axis;
+    they are numbered 0..n-1 within the region, as the push API's 6D mode does.
+    """
+    entries = []
+    for f in fovs:
+        image = f["image"]
+        if structure != "6d" or "fov" not in image.dim_names:
+            entries.append({"region": f["region"], "fov": f["fov"]})
+            continue
+        n_fov = _image_shape(image)[image.dim_names.index("fov")]
+        entries.extend({"region": f["region"], "fov": i} for i in range(n_fov))
+    return entries
+
+
 def _arrange_axes(darr, dim_names: List[str], target: List[str]):
     """Insert singleton axes for target names missing from dim_names, then
     transpose to target order. Raises ValueError on a name not in target."""
@@ -2048,6 +2073,9 @@ class LightweightViewer(QWidget):
         Returns:
             True if navigation succeeded, False if FOV not found.
         """
+        if not self.is_push_mode_active():
+            logger.debug("go_to_well_fov: push mode not active")
+            return False
         if not self._fov_labels:
             logger.debug("go_to_well_fov: no FOV labels available")
             return False
@@ -3119,6 +3147,7 @@ class LightweightViewer(QWidget):
         old_data = self._xarray_data
         old_handles = getattr(self, "_open_handles", [])
         self._xarray_data = data
+        self._accept_load_state(data)
         self._open_handles = data.attrs.get("_open_tifs", [])
 
         # Check if data structure changed (dims, channels, channel names, or LUTs) - if so, force full rebuild
@@ -3190,6 +3219,7 @@ class LightweightViewer(QWidget):
             data = self._create_lazy_array(Path(path))
             if data is not None:
                 self._xarray_data = data  # Store for profiling
+                self._accept_load_state(data)
                 self._open_handles = data.attrs.get("_open_tifs", [])
                 # Always do full rebuild when explicitly loading a new dataset.
                 # This ensures channels/LUTs are properly reset.
@@ -3275,8 +3305,8 @@ class LightweightViewer(QWidget):
             base_path = Path(self.dataset_path)
             fmt = detect_format(base_path)
             if fmt == "zarr_v3":
-                fovs, _, _ = _discover_zarr_images(base_path)
-                return [{"region": f["region"], "fov": f["fov"]} for f in fovs]
+                fovs, structure, _ = _discover_zarr_images(base_path)
+                return _fov_entries(fovs, structure)
             return self._discover_fovs(base_path, fmt)
         except Exception as e:
             logger.debug(f"get_fov_list error: {e}")
@@ -3306,27 +3336,34 @@ class LightweightViewer(QWidget):
             logger.exception("Refresh of %s failed", self.dataset_path)
             self.status_label.setText(f"Error: {e}")
 
+    def _accept_load_state(self, data: "xr.DataArray") -> None:
+        """Apply the FOV labels and incomplete flag of newly shown pull-mode data."""
+        if not self._push_mode_started:
+            self._fov_labels = list(data.attrs.get("_fov_labels", []))
+        self._acquisition_incomplete = bool(
+            data.attrs.get("_acquisition_incomplete", False)
+        )
+
     def _create_lazy_array(self, base_path: Path) -> "Optional[xr.DataArray]":
         """Create lazy xarray from dataset - auto-detects format."""
         if not LAZY_LOADING_AVAILABLE:
             return None
 
         fmt = detect_format(base_path)
-        self._acquisition_incomplete = False
 
-        # Zarr v3 has its own FOV discovery
+        # Zarr v3 has its own FOV discovery. FOV labels and the incomplete flag
+        # travel on the array; _accept_load_state applies them once it is shown.
         if fmt == "zarr_v3":
-            if not self._push_mode_started:
-                self._fov_labels = []
             fovs, structure_type, legacy = _discover_zarr_images(base_path)
             if not fovs:
                 print("No zarr v3 FOVs found")
                 return None
             data = self._load_zarr_v3(base_path, fovs, structure_type)
-            if not self._push_mode_started:
-                self._fov_labels = [f"{f['region']}:{f['fov']}" for f in fovs]
+            data.attrs["_fov_labels"] = [
+                f"{e['region']}:{e['fov']}" for e in _fov_entries(fovs, structure_type)
+            ]
             # Pre-0.5 completion flags are unreliable; label only spec stores
-            self._acquisition_incomplete = not legacy and any(
+            data.attrs["_acquisition_incomplete"] = not legacy and any(
                 not f["image"].acquisition_complete or f["image"].aborted for f in fovs
             )
             return data
@@ -3676,7 +3713,7 @@ class LightweightViewer(QWidget):
             Any failure raises; load_dataset reports it.
         """
         if structure_type == "6d":
-            return self._load_zarr_v3_6d(fovs[0]["image"])
+            return self._load_zarr_v3_6d(fovs)
         return self._load_zarr_v3_5d(fovs)
 
     @staticmethod
@@ -3768,12 +3805,31 @@ class LightweightViewer(QWidget):
         stacked = da.moveaxis(stacked, 3, 2)  # Now (T, FOV, Z, C, Y, X)
         return self._zarr_xarray(stacked, first)
 
-    def _load_zarr_v3_6d(self, image: OmeZarrImage) -> "xr.DataArray":
-        """Load a single zarr v3 image whose axes include a FOV axis."""
-        self._warn_dimension_names(image)
-        darr = self._open_zarr_image(image)
-        darr = _arrange_axes(darr, image.dim_names, ["t", "fov", "z", "c", "y", "x"])
-        return self._zarr_xarray(darr, image)
+    def _load_zarr_v3_6d(self, fovs: List[Dict]) -> "xr.DataArray":
+        """Load region images whose axes include a FOV axis.
+
+        Regions are concatenated along the fov axis in discovery order; their
+        shapes must agree on every other axis.
+        """
+        import dask.array as da
+
+        target = ["t", "fov", "z", "c", "y", "x"]
+        first = fovs[0]
+        self._warn_dimension_names(first["image"])
+        arrays = []
+        for fov_info in fovs:
+            image = fov_info["image"]
+            darr = _arrange_axes(self._open_zarr_image(image), image.dim_names, target)
+            if arrays:
+                ref, other = arrays[0].shape, darr.shape
+                if ref[:1] + ref[2:] != other[:1] + other[2:]:
+                    raise OmeZarrError(
+                        f"regions {first['region']} and {fov_info['region']} have "
+                        f"different shapes {ref} and {other} (t, fov, z, c, y, x)"
+                    )
+            arrays.append(darr)
+        darr = arrays[0] if len(arrays) == 1 else da.concatenate(arrays, axis=1)
+        return self._zarr_xarray(darr, first["image"])
 
     def _set_ndv_data(self, data: "xr.DataArray"):
         """Update NDV viewer with lazy array."""
