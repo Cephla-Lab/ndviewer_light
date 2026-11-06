@@ -1279,23 +1279,24 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
     return [], "unknown"
 
 
-def _discover_zarr_images(base_path: Path) -> Tuple[List[Dict], str]:
+def _discover_zarr_images(base_path: Path) -> Tuple[List[Dict], str, bool]:
     """FOVs with an ``"image"`` (OmeZarrImage) each, from OME-Zarr metadata.
 
-    The legacy directory walk runs only when the layout is not recognised;
-    a recognised layout without acquired fields raises OmeZarrError.
+    Returns (fovs, structure, legacy); legacy is True when the pre-0.5
+    directory walk found them. That walk runs only when the layout is not
+    recognised; a recognised layout without acquired fields raises OmeZarrError.
     """
     fovs, structure = discover_ome_zarr(base_path)
     if structure != "unknown":
         if not fovs:
             raise OmeZarrError(f"{base_path}: no acquired fields")
-        return fovs, structure
+        return fovs, structure, False
     fovs, structure = discover_zarr_v3_fovs(base_path)
     for fov in fovs:
         fov["image"] = image_from_legacy(
             fov["path"], parse_zarr_v3_metadata(fov["path"])
         )
-    return fovs, structure
+    return fovs, structure, True
 
 
 def _arrange_axes(darr, dim_names: List[str], target: List[str]):
@@ -1524,6 +1525,8 @@ class LightweightViewer(QWidget):
         self._tiff_handles_max = 128
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._acquisition_incomplete: bool = False  # zarr pull mode only
+        # True once a push API start ran; pull-mode load_dataset clears it
+        self._push_mode_started: bool = False
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
         self._luts: Dict[int, Any] = {}  # channel_idx -> colormap
@@ -1821,6 +1824,7 @@ class LightweightViewer(QWidget):
         self._image_height = height
         self._image_width = width
         self._fov_labels = list(fov_labels)
+        self._push_mode_started = True
 
         # Set up LUTs based on channel wavelengths
         self._luts = {
@@ -2065,8 +2069,8 @@ class LightweightViewer(QWidget):
         return True
 
     def is_push_mode_active(self) -> bool:
-        """Check if push-based mode is active (has FOV labels configured or zarr mode)."""
-        return bool(self._fov_labels) or self._zarr_acquisition_active
+        """True once a push API start ran (until a pull-mode load) or zarr push is active."""
+        return self._push_mode_started or self._zarr_acquisition_active
 
     def _load_single_plane(
         self, t: int, fov_idx: int, z: int, channel: str
@@ -2353,6 +2357,7 @@ class LightweightViewer(QWidget):
         self._current_time_idx = 0
         self._max_time_idx = 0
         self._zarr_acquisition_active = True
+        self._push_mode_started = True
 
         # Update sliders
         self._updating_sliders = True
@@ -2487,6 +2492,7 @@ class LightweightViewer(QWidget):
         self._current_time_idx = 0
         self._max_time_idx = 0
         self._zarr_acquisition_active = True
+        self._push_mode_started = True
 
         # Update sliders - start at 0, grows as FOVs are acquired
         self._updating_sliders = True
@@ -2945,7 +2951,7 @@ class LightweightViewer(QWidget):
         if fmt == "zarr_v3":
             # For zarr v3, check zarr.json mtime and acquisition_complete flag
             try:
-                fovs, _ = _discover_zarr_images(base)
+                fovs, _, _ = _discover_zarr_images(base)
             except Exception as e:
                 logger.debug("Error discovering zarr FOVs: %s", e)
                 return (fmt, -1, False, 0)
@@ -3174,6 +3180,7 @@ class LightweightViewer(QWidget):
         # between datasets with different channel configurations.
         self._last_sig = None
         self._xarray_data = None
+        self._push_mode_started = False
 
         self.dataset_path = path
         self.status_label.setText(f"Loading: {Path(path).name}...")
@@ -3268,7 +3275,7 @@ class LightweightViewer(QWidget):
             base_path = Path(self.dataset_path)
             fmt = detect_format(base_path)
             if fmt == "zarr_v3":
-                fovs, _ = _discover_zarr_images(base_path)
+                fovs, _, _ = _discover_zarr_images(base_path)
                 return [{"region": f["region"], "fov": f["fov"]} for f in fovs]
             return self._discover_fovs(base_path, fmt)
         except Exception as e:
@@ -3291,8 +3298,13 @@ class LightweightViewer(QWidget):
 
         Useful after loading a new dataset or when you want to update
         the display without waiting for the automatic refresh timer.
+        Loader errors are logged and shown in the status label, never raised.
         """
-        self._force_refresh()
+        try:
+            self._force_refresh()
+        except Exception as e:
+            logger.exception("Refresh of %s failed", self.dataset_path)
+            self.status_label.setText(f"Error: {e}")
 
     def _create_lazy_array(self, base_path: Path) -> "Optional[xr.DataArray]":
         """Create lazy xarray from dataset - auto-detects format."""
@@ -3304,15 +3316,20 @@ class LightweightViewer(QWidget):
 
         # Zarr v3 has its own FOV discovery
         if fmt == "zarr_v3":
-            fovs, structure_type = _discover_zarr_images(base_path)
+            if not self._push_mode_started:
+                self._fov_labels = []
+            fovs, structure_type, legacy = _discover_zarr_images(base_path)
             if not fovs:
                 print("No zarr v3 FOVs found")
                 return None
-            self._fov_labels = [f"{f['region']}:{f['fov']}" for f in fovs]
-            self._acquisition_incomplete = any(
+            data = self._load_zarr_v3(base_path, fovs, structure_type)
+            if not self._push_mode_started:
+                self._fov_labels = [f"{f['region']}:{f['fov']}" for f in fovs]
+            # Pre-0.5 completion flags are unreliable; label only spec stores
+            self._acquisition_incomplete = not legacy and any(
                 not f["image"].acquisition_complete or f["image"].aborted for f in fovs
             )
-            return self._load_zarr_v3(base_path, fovs, structure_type)
+            return data
 
         fovs = self._discover_fovs(base_path, fmt)
 

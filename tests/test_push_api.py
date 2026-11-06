@@ -44,6 +44,24 @@ class TestPushModeDetection:
         assert viewer.is_push_mode_active() is True
 
 
+class TestPushModeDetectionReal:
+    """is_push_mode_active() on a real viewer."""
+
+    def test_push_start_activates_push_mode(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt5.QtWidgets import QApplication
+
+        from ndviewer_light import LightweightViewer
+
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        viewer = LightweightViewer()
+        assert viewer.is_push_mode_active() is False
+        viewer.start_acquisition(["BF"], 1, 8, 8, ["A1:0", "A1:1"])
+        assert viewer.is_push_mode_active() is True
+        viewer.end_acquisition()
+        assert viewer.is_push_mode_active() is True  # navigation after the run
+
+
 class TestStartAcquisition:
     """Tests for start_acquisition() initialization."""
 

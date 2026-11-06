@@ -84,6 +84,7 @@ def test_broken_fov_fails_the_load(qapp, tmp_path):
     assert v._xarray_data is None
     assert v.status_label.text().startswith("Error:")
     assert "B/3/1" in v.status_label.text()
+    assert v._fov_labels == []
 
 
 def test_incomplete_array_is_labelled(qapp, tmp_path):
@@ -144,8 +145,25 @@ def test_legacy_layout_still_loads(qapp, tmp_path):
     v = load(qapp, tmp_path / "run")
     assert dict(v._xarray_data.sizes)["fov"] == 1
     assert v._fov_labels == ["B3:0"]
+    assert v.status_label.text() == "Loaded: run"
 
 
 def test_detect_format_accepts_a_bare_image_group(tmp_path):
     write_image_group(tmp_path / "anything", (1, 2, 3, 8, 8), SQUID_AXES)
     assert detect_format(tmp_path / "anything") == "zarr_v3"
+
+
+def test_pull_load_is_not_push_mode(qapp, tmp_path):
+    write_plate(tmp_path / "p", {"B3": [0, 1]}, rows=["B"], cols=[3])
+    v = load(qapp, tmp_path / "p")
+    assert v._fov_labels == ["B3:0", "B3:1"]
+    assert v.is_push_mode_active() is False
+
+
+def test_refresh_reports_loader_errors(qapp, tmp_path):
+    write_plate(tmp_path / "p", {"B3": [0, 1]}, rows=["B"], cols=[3])
+    v = load(qapp, tmp_path / "p")
+    assert v.status_label.text() == "Loaded: p"
+    shutil.rmtree(tmp_path / "p" / "B" / "3" / "1" / "0")
+    v.refresh()  # must not raise
+    assert v.status_label.text().startswith("Error:")
