@@ -187,3 +187,21 @@ def write_plate(
         _write_group(well_dir, {"ome": {"version": "0.5", "well": {"images": images}}})
         for f in fields:
             write_image_group(well_dir / str(f), **image_kwargs)
+
+
+def write_legacy_image(group: Path, shape: tuple = (1, 2, 3, 8, 8)) -> None:
+    """Write a pre-0.5 Squid store: root-level multiscales, _squid_metadata, array "0"."""
+    group = Path(group)
+    _write_group(
+        group,
+        {
+            "multiscales": [
+                {
+                    "axes": SQUID_AXES,
+                    "datasets": [{"path": "0"}],
+                }
+            ],
+            "_squid_metadata": {"pixel_size_um": 0.65},
+        },
+    )
+    write_array(group / "0", shape)
