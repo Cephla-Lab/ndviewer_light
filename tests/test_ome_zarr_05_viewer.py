@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -239,3 +240,22 @@ def test_tiff_load_after_zarr_clears_labels(qapp, tmp_path):
     v.load_dataset(str(tmp_path / "tiffs"))
     assert v._xarray_data is not None
     assert v._fov_labels == []
+
+
+class TestExternalFixture:
+    def test_external_fixture_loads(self, qapp):
+        """A store written by ngff-zarr (dataset path scale0/image) loads."""
+        v = load(qapp, Path(__file__).parent / "fixtures" / "external_05.ome.zarr")
+        data = v._xarray_data
+        assert dict(data.sizes) == {
+            "time": 1,
+            "fov": 1,
+            "z": 3,
+            "channel": 2,
+            "y": 8,
+            "x": 8,
+        }
+        assert data.attrs["pixel_size_um"] == pytest.approx(0.5)
+        assert data.attrs["dz_um"] == pytest.approx(2.0)
+        plane = data.isel(time=0, fov=0, z=2, channel=1, y=3, x=3)
+        assert int(plane.values) == plane_value(1, 2)
