@@ -259,3 +259,24 @@ class TestExternalFixture:
         assert data.attrs["dz_um"] == pytest.approx(2.0)
         plane = data.isel(time=0, fov=0, z=2, channel=1, y=3, x=3)
         assert int(plane.values) == plane_value(1, 2)
+
+
+def test_axis_rank_mismatch_names_the_array(qapp, tmp_path):
+    write_image_group(tmp_path / "i", (2, 3, 8, 8), SQUID_AXES)  # 4-dim, 5 axes
+    v = load(qapp, tmp_path / "i")
+    assert v._xarray_data is None
+    assert v.status_label.text().startswith("Error:")
+    assert str(tmp_path / "i" / "0") in v.status_label.text()
+
+
+def test_upper_case_dimension_names_do_not_warn(qapp, tmp_path, caplog):
+    write_image_group(
+        tmp_path / "i",
+        (1, 2, 3, 8, 8),
+        SQUID_AXES,
+        dimension_names=["T", "C", "Z", "Y", "X"],
+    )
+    with caplog.at_level(logging.WARNING):
+        v = load(qapp, tmp_path / "i")
+    assert v._xarray_data is not None
+    assert "dimension_names" not in caplog.text

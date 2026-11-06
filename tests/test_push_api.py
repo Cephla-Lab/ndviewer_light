@@ -20,30 +20,6 @@ from unittest.mock import MagicMock
 import numpy as np
 
 
-class TestPushModeDetection:
-    """Tests for is_push_mode_active() method."""
-
-    def test_push_mode_inactive_when_no_fov_labels(self):
-        """Push mode is inactive when _fov_labels is empty."""
-        from ndviewer_light import LightweightViewer
-
-        viewer = MagicMock(spec=LightweightViewer)
-        viewer._fov_labels = []
-        viewer.is_push_mode_active = lambda: bool(viewer._fov_labels)
-
-        assert viewer.is_push_mode_active() is False
-
-    def test_push_mode_active_when_fov_labels_set(self):
-        """Push mode is active when _fov_labels has values."""
-        from ndviewer_light import LightweightViewer
-
-        viewer = MagicMock(spec=LightweightViewer)
-        viewer._fov_labels = ["A1:0", "A1:1", "A2:0"]
-        viewer.is_push_mode_active = lambda: bool(viewer._fov_labels)
-
-        assert viewer.is_push_mode_active() is True
-
-
 class TestPushModeDetectionReal:
     """is_push_mode_active() on a real viewer."""
 

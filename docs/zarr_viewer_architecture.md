@@ -31,23 +31,27 @@ The viewer uses a three-layer stack to provide lazy, labeled access to zarr data
 
 ## How the Layers Connect
 
-From `_load_zarr_v3_5d` in `core.py`:
+FOVs are found from the OME-Zarr 0.5 metadata in `ndviewer_light/ome_zarr.py`:
+`plate.wells` → each well's `well.images` → each image's
+`multiscales[0].datasets[0].path` (the full-resolution array), with axes, scale and
+channels read from the same metadata. The old directory walk (`discover_zarr_v3_fovs`)
+runs only when no OME-Zarr 0.5 layout is recognised (pre-0.5 Squid stores).
+
+`_load_zarr_v3_5d` / `_load_zarr_v3_6d` in `core.py` then build the array per image:
 
 ```python
-# 1. Tensorstore opens the zarr store
-ts_arr = open_zarr_tensorstore(fov_path, array_path="0")
+# 1. Tensorstore opens the image's array; dask wraps it with one chunk per plane
+darr = self._open_zarr_image(image)  # open_zarr_tensorstore(image.group, image.array_path)
 
-# 2. Dask wraps tensorstore with chunking strategy
-chunks = (1, 1, 1, height, width)  # One chunk per plane
-darr = da.from_array(ts_arr, chunks=chunks)
+# 2. The image's axes are put in a fixed order (singleton axes added when missing)
+darr = _arrange_axes(darr, image.dim_names, ["t", "c", "z", "y", "x"])
 
-# 3. Xarray adds dimension labels
-xarr = xr.DataArray(
-    darr,
-    dims=["time", "fov", "z", "channel", "y", "x"],
-    coords={...}
-)
+# 3. FOVs are stacked and xarray adds dimension labels, channel LUTs and scale
+xarr = self._zarr_xarray(stacked, first_image)  # dims: time, fov, z, channel, y, x
 ```
+
+A FOV that fails to open fails the whole load; the status label shows the error and
+the path. There is no placeholder.
 
 Tensorstore implements the `__getitem__` protocol, so dask can treat it like a NumPy array:
 

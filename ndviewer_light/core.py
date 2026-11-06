@@ -1307,6 +1307,14 @@ def _image_shape(image: OmeZarrImage) -> tuple:
     return tuple(ts_arr.shape)
 
 
+def _arrange_image_axes(darr, image: OmeZarrImage, target: List[str]):
+    """_arrange_axes for an image; errors name the image's array."""
+    try:
+        return _arrange_axes(darr, image.dim_names, target)
+    except ValueError as e:
+        raise OmeZarrError(f"{image.array_dir}: {e}") from e
+
+
 def _fov_entries(fovs: List[Dict], structure: str) -> List[Dict]:
     """One {"region", "fov"} per FOV of the loaded array, in array order.
 
@@ -3125,6 +3133,14 @@ class LightweightViewer(QWidget):
             return False
 
     def _maybe_refresh(self):
+        """Refresh slot: loader errors are logged and shown, never raised into Qt."""
+        try:
+            self._refresh_if_changed()
+        except Exception as e:
+            logger.exception("Refresh of %s failed", self.dataset_path)
+            self.status_label.setText(f"Error: {e}")
+
+    def _refresh_if_changed(self):
         if not LAZY_LOADING_AVAILABLE:
             return
 
@@ -3330,11 +3346,7 @@ class LightweightViewer(QWidget):
         the display without waiting for the automatic refresh timer.
         Loader errors are logged and shown in the status label, never raised.
         """
-        try:
-            self._force_refresh()
-        except Exception as e:
-            logger.exception("Refresh of %s failed", self.dataset_path)
-            self.status_label.setText(f"Error: {e}")
+        self._force_refresh()
 
     def _accept_load_state(self, data: "xr.DataArray") -> None:
         """Apply the FOV labels and incomplete flag of newly shown pull-mode data."""
@@ -3732,7 +3744,7 @@ class LightweightViewer(QWidget):
     @staticmethod
     def _warn_dimension_names(image: OmeZarrImage) -> None:
         names = array_dimension_names(image)
-        if names is not None and names != image.dim_names:
+        if names is not None and [str(n).lower() for n in names] != image.dim_names:
             logger.warning(
                 "%s: array dimension_names %s differ from the axes %s; using the axes",
                 image.array_dir,
@@ -3796,7 +3808,7 @@ class LightweightViewer(QWidget):
             image = fov_info["image"]
             darr = self._open_zarr_image(image)
             fov_arrays.append(
-                _arrange_axes(darr, image.dim_names, ["t", "c", "z", "y", "x"])
+                _arrange_image_axes(darr, image, ["t", "c", "z", "y", "x"])
             )
 
         # Stack FOVs: (FOV, T, C, Z, Y, X) -> (T, FOV, Z, C, Y, X)
@@ -3819,7 +3831,7 @@ class LightweightViewer(QWidget):
         arrays = []
         for fov_info in fovs:
             image = fov_info["image"]
-            darr = _arrange_axes(self._open_zarr_image(image), image.dim_names, target)
+            darr = _arrange_image_axes(self._open_zarr_image(image), image, target)
             if arrays:
                 ref, other = arrays[0].shape, darr.shape
                 if ref[:1] + ref[2:] != other[:1] + other[2:]:
