@@ -2,9 +2,10 @@
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("ndviewer_light.ome_zarr")
 
@@ -223,3 +224,174 @@ def array_dimension_names(image: OmeZarrImage) -> Optional[List[str]]:
         "dimension_names"
     )
     return list(names) if names else None
+
+
+def _ome_attrs(path: Path) -> Optional[dict]:
+    """The ``ome`` dict of ``path/zarr.json``; None when the node is unreadable."""
+    try:
+        return read_node_attrs(path).get("ome") or {}
+    except (OSError, OmeZarrError):
+        return None
+
+
+def is_ome_zarr_node(path: Path) -> bool:
+    """True when ``path/zarr.json`` carries ome.plate, ome.well or ome.multiscales."""
+    ome = _ome_attrs(Path(path))
+    return bool(ome) and any(key in ome for key in ("plate", "well", "multiscales"))
+
+
+def _read_ome(path: Path) -> dict:
+    """Attributes of an existing node, any failure reported with its path."""
+    try:
+        return read_node_attrs(path)
+    except (OSError, OmeZarrError) as exc:
+        raise OmeZarrError(f"{path}: {exc}") from exc
+
+
+def _parse_existing_image(group: Path) -> OmeZarrImage:
+    attrs = _read_ome(group)
+    try:
+        return parse_image(group, attrs)
+    except OmeZarrError as exc:
+        raise OmeZarrError(f"{group}: {exc}") from exc
+
+
+def _entry(region: str, fov: int, image: OmeZarrImage) -> dict:
+    return {"region": region, "fov": fov, "path": image.group, "image": image}
+
+
+def _structure_of(images: List[OmeZarrImage]) -> str:
+    return "6d" if any("fov" in image.dim_names for image in images) else "per_fov"
+
+
+def _well_fields(well_dir: Path, region: str, skipped: List[str], root: Path):
+    """Entries for the images listed by a well group; absent ones are skipped."""
+    images = (_read_ome(well_dir).get("ome") or {}).get("well", {}).get("images", [])
+    entries = []
+    for j, listed in enumerate(images):
+        name = str(listed.get("path", ""))
+        field_dir = well_dir / name
+        if not field_dir.is_dir():
+            skipped.append(_relative(field_dir, root))
+            continue
+        fov = int(name) if name.isdigit() else j
+        entries.append(_entry(region, fov, _parse_existing_image(field_dir)))
+    return entries
+
+
+def _relative(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _discover_plate(plate_dir: Path, plate: dict):
+    rows = [r.get("name", "") for r in plate.get("rows", [])]
+    columns = [c.get("name", "") for c in plate.get("columns", [])]
+    wells = sorted(
+        plate.get("wells", []),
+        key=lambda w: (w.get("rowIndex", 0), w.get("columnIndex", 0)),
+    )
+    skipped: List[str] = []
+    entries = []
+    for well in wells:
+        well_dir = plate_dir / well["path"]
+        if not well_dir.is_dir():
+            skipped.append(_relative(well_dir, plate_dir))
+            continue
+        region = rows[well["rowIndex"]] + columns[well["columnIndex"]]
+        entries.extend(_well_fields(well_dir, region, skipped, plate_dir))
+    _warn_skipped(plate_dir, skipped)
+    return entries
+
+
+def _warn_skipped(root: Path, skipped: List[str]) -> None:
+    if skipped:
+        logger.warning(
+            "%s: %d listed entries not acquired (absent): %s",
+            root,
+            len(skipped),
+            ", ".join(skipped),
+        )
+
+
+def _discover_experiment_folder(root: Path):
+    """Plate, or zarr/<region>/{fov_<n>.ome.zarr, acquisition.zarr}; None if neither."""
+    for name in ("plate.ome.zarr", "plate.zarr"):
+        plate_dir = root / name
+        plate = (_ome_attrs(plate_dir) or {}).get("plate")
+        if plate is not None:
+            return _discover_plate(plate_dir, plate), "hcs_plate"
+
+    zarr_dir = root / "zarr"
+    if not zarr_dir.is_dir():
+        return None
+    entries = []
+    images = []
+    for region_dir in sorted(p for p in zarr_dir.iterdir() if p.is_dir()):
+        fov_dirs = []
+        for child in region_dir.iterdir():
+            match = re.fullmatch(r"fov_(\d+)\.ome\.zarr", child.name)
+            if match and child.is_dir():
+                fov_dirs.append((int(match.group(1)), child))
+        for fov, fov_dir in sorted(fov_dirs):
+            image = _parse_existing_image(fov_dir)
+            images.append(image)
+            entries.append(_entry(region_dir.name, fov, image))
+        acquisition = region_dir / "acquisition.zarr"
+        if "multiscales" in (_ome_attrs(acquisition) or {}):
+            image = _parse_existing_image(acquisition)
+            images.append(image)
+            entries.append(_entry(region_dir.name, 0, image))
+    if not entries:
+        return None
+    return entries, _structure_of(images)
+
+
+def discover_ome_zarr(root: Path) -> Tuple[List[dict], str]:
+    """Find the FOVs under ``root`` from OME-Zarr 0.5 metadata.
+
+    Returns (entries, structure); entries are {"region", "fov", "path", "image"}.
+    structure is "hcs_plate", "6d", "per_fov", or "unknown" when the layout is
+    not recognised (the caller then tries the legacy directory walk).
+    """
+    root = Path(root)
+    ome = _ome_attrs(root) or {}
+    if "plate" in ome:
+        return _discover_plate(root, ome["plate"]), "hcs_plate"
+    if "well" in ome:
+        skipped: List[str] = []
+        region = root.parent.parent.name + root.name
+        entries = _well_fields(root, region, skipped, root)
+        _warn_skipped(root, skipped)
+        return entries, "hcs_plate"
+    if "multiscales" in ome:
+        image = _parse_existing_image(root)
+        return [_entry("default", 0, image)], _structure_of([image])
+
+    found = _discover_experiment_folder(root)
+    return found if found is not None else ([], "unknown")
+
+
+def image_from_legacy(path: Path, meta: dict) -> OmeZarrImage:
+    """Describe a pre-0.5 store from the dict ``core.parse_zarr_v3_metadata`` returns."""
+    axes = meta.get("axes") or []
+    dim_names = normalise_axis_names(axes) if axes else ["t", "c", "z", "y", "x"]
+    scale_um: Dict[str, float] = {}
+    if meta.get("pixel_size_um") is not None:
+        scale_um["y"] = scale_um["x"] = meta["pixel_size_um"]
+    if meta.get("dz_um") is not None:
+        scale_um["z"] = meta["dz_um"]
+    return OmeZarrImage(
+        group=Path(path),
+        array_path="0",
+        axes=axes,
+        dim_names=dim_names,
+        scale_um=scale_um,
+        channel_names=list(meta.get("channel_names") or []),
+        channel_colors=list(meta.get("channel_colors") or []),
+        version=None,
+        acquisition_complete=meta.get("acquisition_complete", True),
+        aborted=False,
+    )

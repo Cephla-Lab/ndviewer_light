@@ -2,12 +2,16 @@
 
 import json
 import logging
+import shutil
 
 import pytest
 
 from ndviewer_light.ome_zarr import (
     OmeZarrError,
     array_dimension_names,
+    discover_ome_zarr,
+    image_from_legacy,
+    is_ome_zarr_node,
     normalise_axis_names,
     parse_image,
     read_node_attrs,
@@ -219,3 +223,133 @@ class TestUnitsAndPlateFixture:
         assert plate["columns"] == [{"name": "3"}, {"name": "5"}]
         for image in ("B/3/0", "B/3/1", "D/5/0"):
             assert (tmp_path / "p" / image / "zarr.json").exists()
+
+
+class TestDiscover:
+    def test_plate_discovery_follows_wells_and_images(self, tmp_path):
+        write_plate(
+            tmp_path / "plate.ome.zarr",
+            {"D5": [0], "B3": [0, 1]},
+            rows=["B", "D"],
+            cols=[3, 5],
+        )
+        fovs, structure = discover_ome_zarr(tmp_path / "plate.ome.zarr")
+        assert structure == "hcs_plate"
+        assert [(f["region"], f["fov"]) for f in fovs] == [
+            ("B3", 0),
+            ("B3", 1),
+            ("D5", 0),
+        ]
+        expected = tmp_path / "plate.ome.zarr" / "B" / "3" / "0" / "0"
+        assert fovs[0]["image"].array_dir == expected
+
+    def test_experiment_folder_with_plate(self, tmp_path):
+        write_plate(
+            tmp_path / "run" / "plate.ome.zarr", {"B3": [0]}, rows=["B"], cols=[3]
+        )
+        (tmp_path / "run" / "acquisition parameters.json").write_text("{}")
+        fovs, _ = discover_ome_zarr(tmp_path / "run")
+        assert [(f["region"], f["fov"]) for f in fovs] == [("B3", 0)]
+
+    def test_field_id_is_the_numeric_path(self, tmp_path):
+        write_plate(tmp_path / "p", {"B3": [0, 1]}, rows=["B"], cols=[3])
+        shutil.rmtree(tmp_path / "p" / "B" / "3" / "0")
+        fovs, _ = discover_ome_zarr(tmp_path / "p")
+        assert [(f["region"], f["fov"]) for f in fovs] == [("B3", 1)]
+
+    def test_absent_listed_well_is_skipped_with_a_warning(self, tmp_path, caplog):
+        write_plate(
+            tmp_path / "p", {"B3": [0], "D5": [0]}, rows=["B", "D"], cols=[3, 5]
+        )
+        shutil.rmtree(tmp_path / "p" / "D")
+        with caplog.at_level(logging.WARNING, logger="ndviewer_light.ome_zarr"):
+            fovs, _ = discover_ome_zarr(tmp_path / "p")
+        assert [f["region"] for f in fovs] == ["B3"] and "D/5" in caplog.text
+
+    def test_existing_field_without_metadata_is_broken(self, tmp_path):
+        write_plate(tmp_path / "p", {"B3": [0]}, rows=["B"], cols=[3])
+        (tmp_path / "p" / "B" / "3" / "0" / "zarr.json").unlink()
+        with pytest.raises(OmeZarrError, match="B/3/0"):
+            discover_ome_zarr(tmp_path / "p")
+
+    def test_well_group_opened_directly(self, tmp_path):
+        write_plate(tmp_path / "p", {"B3": [0, 1]}, rows=["B"], cols=[3])
+        fovs, structure = discover_ome_zarr(tmp_path / "p" / "B" / "3")
+        assert structure == "hcs_plate" and [f["fov"] for f in fovs] == [0, 1]
+
+    def test_single_image_group(self, tmp_path):
+        write_image_group(tmp_path / "img.ome.zarr", (1, 2, 3, 8, 8), SQUID_AXES)
+        fovs, structure = discover_ome_zarr(tmp_path / "img.ome.zarr")
+        assert structure == "per_fov"
+        assert (fovs[0]["region"], fovs[0]["fov"]) == ("default", 0)
+
+    def test_experiment_folder_per_fov_layout(self, tmp_path):
+        for n in (10, 2):
+            write_image_group(
+                tmp_path / "run" / "zarr" / "region_0" / f"fov_{n}.ome.zarr",
+                (1, 2, 3, 8, 8),
+                SQUID_AXES,
+            )
+        fovs, structure = discover_ome_zarr(tmp_path / "run")
+        assert structure == "per_fov"
+        assert [(f["region"], f["fov"]) for f in fovs] == [
+            ("region_0", 2),
+            ("region_0", 10),
+        ]
+
+    def test_6d_image_is_structure_6d(self, tmp_path):
+        axes = [{"name": "fov", "type": "fov"}] + SQUID_AXES
+        write_image_group(
+            tmp_path / "run" / "zarr" / "r" / "acquisition.zarr",
+            (2, 1, 2, 3, 8, 8),
+            axes,
+            dataset_path=".",
+            node_type="array",
+            dimension_names=["fov", "t", "c", "z", "y", "x"],
+        )
+        fovs, structure = discover_ome_zarr(tmp_path / "run")
+        assert structure == "6d" and fovs[0]["image"].array_path == "."
+        assert (fovs[0]["region"], fovs[0]["fov"]) == ("r", 0)
+
+    def test_is_ome_zarr_node(self, tmp_path):
+        write_image_group(tmp_path / "i", (1, 2, 3, 8, 8), SQUID_AXES)
+        assert is_ome_zarr_node(tmp_path / "i") and not is_ome_zarr_node(tmp_path)
+
+    def test_nothing_matching_is_unknown(self, tmp_path):
+        assert discover_ome_zarr(tmp_path) == ([], "unknown")
+
+    def test_recognised_plate_with_no_acquired_fields_is_not_unknown(self, tmp_path):
+        write_plate(tmp_path / "p", {"B3": [0]}, rows=["B"], cols=[3])
+        shutil.rmtree(tmp_path / "p" / "B" / "3" / "0")
+        assert discover_ome_zarr(tmp_path / "p") == ([], "hcs_plate")
+
+    def test_pre_05_plate_folder_is_unknown_not_an_error(self, tmp_path):
+        plate = tmp_path / "run" / "plate.zarr"
+        plate.mkdir(parents=True)
+        (plate / ".zgroup").write_text("{}")
+        assert discover_ome_zarr(tmp_path / "run") == ([], "unknown")
+        (plate / "zarr.json").write_text(
+            '{"zarr_format": 3, "node_type": "group", "attributes": {}}'
+        )
+        assert discover_ome_zarr(tmp_path / "run") == ([], "unknown")
+
+    def test_legacy_fov_folder_without_ome_suffix_is_ignored(self, tmp_path):
+        (tmp_path / "run" / "zarr" / "r" / "fov_0.zarr").mkdir(parents=True)
+        assert discover_ome_zarr(tmp_path / "run") == ([], "unknown")
+
+    def test_image_from_legacy(self, tmp_path):
+        meta = {
+            "axes": [],
+            "pixel_size_um": 0.5,
+            "dz_um": 2.0,
+            "channel_names": ["a"],
+            "channel_colors": ["FFFFFF"],
+            "acquisition_complete": False,
+        }
+        image = image_from_legacy(tmp_path, meta)
+        assert image.array_path == "0" and image.dim_names == list("tczyx")
+        assert (image.pixel_size_um, image.dz_um) == (0.5, 2.0)
+        assert image.scale_um["y"] == 0.5
+        assert image.version is None and image.aborted is False
+        assert image.acquisition_complete is False
+        assert image.channel_names == ["a"]
