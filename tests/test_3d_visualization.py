@@ -126,7 +126,7 @@ def main():
     # Try to launch viewer
     try:
         sys.path.insert(0, str(Path(__file__).parent.parent))
-        from PyQt5.QtWidgets import QApplication
+        from qtpy.QtWidgets import QApplication
 
         from ndviewer_light import LightweightMainWindow
 

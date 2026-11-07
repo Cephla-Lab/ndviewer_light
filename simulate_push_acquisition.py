@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QApplication
+from qtpy.QtCore import QTimer
+from qtpy.QtWidgets import QApplication
 
 from ndviewer_light import LightweightViewer
 
