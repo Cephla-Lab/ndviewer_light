@@ -195,9 +195,6 @@ class MemoryBoundedLRUCache:
             return len(self._cache)
 
 
-# Module-level variable for voxel scale (used by monkey-patched add_volume)
-_current_voxel_scale: Optional[Tuple[float, float, float]] = None
-
 # NDV viewer
 try:
     import ndv
@@ -226,121 +223,6 @@ try:
     except ImportError:
         pass  # superqt not available
 
-    # Monkeypatch vispy VolumeVisual to support anisotropic voxels
-    # This allows correct 3D rendering when Z step differs from XY pixel size
-    try:
-        from ndv.views._vispy._array_canvas import VispyArrayCanvas
-        from vispy.visuals.volume import VolumeVisual
-
-        if not getattr(VolumeVisual, "_voxel_scale_patch", False):
-            _orig_init = VolumeVisual.__init__
-            _orig_create_vertex_data = VolumeVisual._create_vertex_data
-
-            def _patched_init(self, *args, **kwargs):
-                """Initialize VolumeVisual and capture the current voxel scale.
-
-                Storing the scale as an instance attribute ensures thread safety
-                when multiple volumes are created concurrently - each volume
-                captures the scale that was active at its construction time.
-                """
-                _orig_init(self, *args, **kwargs)
-                # Capture the voxel scale active at construction time
-                # Use try/except to handle frozen vispy objects (e.g., napari's Volume)
-                global _current_voxel_scale
-                try:
-                    self._voxel_scale = _current_voxel_scale
-                except AttributeError:
-                    # Object is frozen (e.g., napari), skip the patch
-                    pass
-
-            VolumeVisual.__init__ = _patched_init
-
-            def _patched_create_vertex_data(self):
-                """Create vertices with Z scaling for anisotropic voxels.
-
-                Uses the instance's _voxel_scale attribute (set at construction)
-                rather than the global to ensure correct scaling even when
-                multiple volumes exist with different scales.
-
-                Falls back to original implementation when no scale is set.
-                """
-                # If no scale set, use original implementation
-                scale = getattr(self, "_voxel_scale", None)
-                if scale is None:
-                    return _orig_create_vertex_data(self)
-
-                shape = self._vol_shape
-
-                # Get corner coordinates with Z scaling
-                x0, x1 = -0.5, shape[2] - 0.5
-                y0, y1 = -0.5, shape[1] - 0.5
-
-                # Apply Z scale from instance attribute
-                sz = scale[2]
-                z0, z1 = -0.5 * sz, (shape[0] - 0.5) * sz
-
-                pos = np.array(
-                    [
-                        [x0, y0, z0],
-                        [x1, y0, z0],
-                        [x0, y1, z0],
-                        [x1, y1, z0],
-                        [x0, y0, z1],
-                        [x1, y0, z1],
-                        [x0, y1, z1],
-                        [x1, y1, z1],
-                    ],
-                    dtype=np.float32,
-                )
-
-                indices = np.array(
-                    [2, 6, 0, 4, 5, 6, 7, 2, 3, 0, 1, 5, 3, 7], dtype=np.uint32
-                )
-
-                self._vertices.set_data(pos)
-                self._index_buffer.set_data(indices)
-
-            VolumeVisual._create_vertex_data = _patched_create_vertex_data
-            VolumeVisual._voxel_scale_patch = True
-            logger.info("Voxel scale patch applied to VolumeVisual")
-
-        # Also patch add_volume to update camera range
-        if not getattr(VispyArrayCanvas, "_camera_scale_patch", False):
-            _orig_add_volume = VispyArrayCanvas.add_volume
-
-            def _patched_add_volume(self, data=None):
-                global _current_voxel_scale
-                handle = _orig_add_volume(self, data)
-                # Update camera to account for scaled Z dimension
-                if _current_voxel_scale is not None and data is not None:
-                    # Ensure data has at least 3 dimensions
-                    shape = getattr(data, "shape", None)
-                    if shape is None or len(shape) < 3:
-                        return handle
-                    try:
-                        sz = _current_voxel_scale[2]
-                        if abs(sz - 1.0) > 0.01:
-                            z_size = shape[0] * sz
-                            max_size = max(shape[1], shape[2], z_size)
-                            # Add margin to scale_factor for comfortable viewing distance
-                            self._camera.scale_factor = max_size + 6
-                            self._view.camera.set_range(
-                                x=(0, shape[2]),
-                                y=(0, shape[1]),
-                                z=(0, z_size),
-                                margin=0.01,
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to adjust camera for anisotropic voxels: %s", e
-                        )
-                return handle
-
-            VispyArrayCanvas.add_volume = _patched_add_volume
-            VispyArrayCanvas._camera_scale_patch = True
-    except ImportError:
-        pass  # vispy not available
-
 except ImportError:
     NDV_AVAILABLE = False
 
@@ -351,7 +233,6 @@ try:
     import dask.array as da
     import tifffile as tf
     import xarray as xr
-    from scipy.ndimage import zoom as ndimage_zoom
 
     LAZY_LOADING_AVAILABLE = True
 except ImportError as e:
@@ -363,174 +244,6 @@ except ImportError as e:
         stacklevel=1,
     )
     LAZY_LOADING_AVAILABLE = False
-
-# OpenGL 3D texture size limit (conservative estimate for most GPUs)
-MAX_3D_TEXTURE_SIZE = 2048
-
-# Register custom DataWrapper for automatic 3D downsampling
-if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
-    from collections.abc import Mapping
-
-    from ndv.models._data_wrapper import XarrayWrapper
-
-    class Downsampling3DXarrayWrapper(XarrayWrapper):
-        """XarrayWrapper that automatically downsamples 3D volumes for OpenGL.
-
-        This wrapper extends NDV's XarrayWrapper to detect when a 3D volume
-        request would exceed OpenGL texture limits and automatically downsamples
-        the data. 2D slice requests remain at full resolution.
-        """
-
-        # Higher priority than default XarrayWrapper (50)
-        PRIORITY = 40
-
-        # Class-level cache for OpenGL texture limit (queried once, shared by all instances)
-        _cached_max_texture_size: Optional[int] = None
-
-        def __init__(self, data: xr.DataArray):
-            super().__init__(data)
-
-        @classmethod
-        def _get_max_texture_size(cls) -> int:
-            """Query and cache the GPU's GL_MAX_3D_TEXTURE_SIZE.
-
-            This is queried lazily on first 3D request when OpenGL context exists.
-            Falls back to conservative default if query fails or no context available.
-            """
-            if cls._cached_max_texture_size is None:
-                try:
-                    # Check if vispy has an active GL context before querying
-                    # Calling OpenGL without a context causes segfault
-                    from vispy import app
-
-                    # Check for active vispy application - use _backend_module which
-                    # is set when a backend is actually loaded and initialized
-                    backend = getattr(app, "_backend_module", None)
-                    if backend is None:
-                        logger.debug(
-                            "No vispy backend loaded - using fallback texture size"
-                        )
-                        cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE
-                        return cls._cached_max_texture_size
-
-                    from OpenGL.GL import GL_MAX_3D_TEXTURE_SIZE, glGetIntegerv
-
-                    limit = glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE)
-                    cls._cached_max_texture_size = int(limit)
-                    logger.info(f"Detected GL_MAX_3D_TEXTURE_SIZE: {limit}")
-                except Exception as e:
-                    logger.debug(f"Failed to query GL_MAX_3D_TEXTURE_SIZE: {e}")
-                    cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE  # Fallback
-            return cls._cached_max_texture_size
-
-        @classmethod
-        def supports(cls, obj) -> bool:
-            """Check if this wrapper supports the given object."""
-            # Note: LAZY_LOADING_AVAILABLE check is unnecessary here since this
-            # class is only defined when LAZY_LOADING_AVAILABLE is True (line 85)
-            return isinstance(obj, xr.DataArray)
-
-        def isel(self, index: Mapping[int, int | slice]) -> np.ndarray:
-            """Return a slice of the data, with automatic 3D downsampling.
-
-            For 2D slices (viewing a single plane), returns full resolution.
-            For 3D volumes (viewing a stack), downsamples if needed to fit
-            within OpenGL texture limits.
-
-            Downsampling strategy:
-            - If physical pixel sizes are known (pixel_size_um, dz_um in attrs),
-              scale to maintain correct physical aspect ratio
-            - Otherwise: z scaled independently, x/y scaled uniformly
-            - channel/time/fov: never scaled
-            """
-            # Get the data using parent's implementation
-            data = super().isel(index)
-
-            # Determine which original dimensions are non-singleton
-            dims = self._data.dims
-            non_singleton_dims = []
-            for i, dim in enumerate(dims):
-                idx = index.get(i, slice(None))
-                if isinstance(idx, slice):
-                    dim_size = self._data.shape[i]
-                    start = idx.start or 0
-                    stop = idx.stop or dim_size
-                    if stop - start > 1:
-                        non_singleton_dims.append(str(dim).lower())
-
-            # Check if we have spatial z dimension (indicates 3D volume)
-            spatial_z_names = {"z", "z_level", "depth", "focus"}
-            has_z = any(d in spatial_z_names for d in non_singleton_dims)
-            if not has_z:
-                return data  # Not a 3D volume request
-
-            # Check if any spatial dimension exceeds the texture limit
-            max_texture_size = self._get_max_texture_size()
-
-            # First pass: find dimensions and their sizes in output data
-            dim_info = []  # [(dim_name, size), ...]
-            for i, dim in enumerate(dims):
-                idx = index.get(i, slice(None))
-                if isinstance(idx, int):
-                    continue  # Dropped dimension
-                dim_info.append((str(dim).lower(), data.shape[len(dim_info)]))
-
-            # Compute zoom factors for downsampling
-            zoom_factors, needs_downsampling = self._compute_simple_zoom_factors(
-                dim_info, max_texture_size, spatial_z_names
-            )
-
-            if needs_downsampling:
-                logger.info(
-                    f"Downsampling 3D volume from {data.shape} "
-                    f"(factors={[f'{z:.3f}' for z in zoom_factors]}) for OpenGL rendering"
-                )
-
-                # Use order=0 (nearest neighbor) for speed - much faster than bilinear
-                try:
-                    downsampled = ndimage_zoom(data, zoom_factors, order=0)
-                    return downsampled.astype(data.dtype)
-                except Exception as e:
-                    logger.warning(f"Downsampling failed: {e}, returning original data")
-                    return data
-
-            return data
-
-        def _compute_simple_zoom_factors(
-            self, dim_info: list, max_texture_size: int, spatial_z_names: set
-        ) -> tuple:
-            """Compute zoom factors for 3D volume downsampling.
-
-            Strategy:
-            - XY: scaled uniformly (same factor for X and Y) to preserve XY aspect ratio
-            - Z: scaled independently only if it exceeds the texture limit
-            - Non-spatial dims (channel, time, fov): never scaled
-
-            Note: Physical aspect ratio correction is handled via vertex scaling
-            in the vispy VolumeVisual patch.
-            """
-            # Calculate xy scale factor (uniform for x and y to preserve XY aspect)
-            xy_sizes = [size for name, size in dim_info if name in {"y", "x"}]
-            xy_max = max(xy_sizes) if xy_sizes else 0
-            xy_scale = max_texture_size / xy_max if xy_max > max_texture_size else 1.0
-
-            # Build zoom factors
-            zoom_factors = []
-            needs_downsampling = False
-            for dim_name, dim_size in dim_info:
-                if dim_name in {"y", "x"}:
-                    zoom_factors.append(xy_scale)
-                    if xy_scale < 1.0:
-                        needs_downsampling = True
-                elif dim_name in spatial_z_names and dim_size > max_texture_size:
-                    z_scale = max_texture_size / dim_size
-                    zoom_factors.append(z_scale)
-                    needs_downsampling = True
-                else:
-                    zoom_factors.append(1.0)
-
-            return zoom_factors, needs_downsampling
-
 
 # Filename patterns (from common.py)
 FPATTERN = re.compile(
@@ -3837,12 +3550,10 @@ class LightweightViewer(QWidget):
 
     def _set_ndv_data(self, data: "xr.DataArray"):
         """Update NDV viewer with lazy array."""
-        global _current_voxel_scale
-
         if not NDV_AVAILABLE or not self.ndv_viewer:
             return
 
-        # Log scale information and set voxel scale for 3D rendering
+        # Log scale information
         pixel_size = data.attrs.get("pixel_size_um")
         dz = data.attrs.get("dz_um")
         if pixel_size is not None or dz is not None:
@@ -3853,23 +3564,24 @@ class LightweightViewer(QWidget):
                 scale_info.append(f"Z step: {dz:.4f} µm")
             print(f"Scale metadata: {', '.join(scale_info)}")
 
-            # Set voxel scale for 3D rendering (Z scaled relative to XY)
-            if pixel_size is not None and dz is not None and pixel_size > 0:
-                z_scale = dz / pixel_size
-                _current_voxel_scale = (1.0, 1.0, z_scale)
-                logger.info(f"Voxel aspect ratio (Z/XY): {z_scale:.2f}")
-            else:
-                _current_voxel_scale = None
-        else:
-            _current_voxel_scale = None
+        # Voxel aspect for 3D rendering through ndv's public per-axis ``scales``:
+        # the z axis is dz/pixel_size pixels tall (xy stay 1.0). ndv applies it as
+        # an STTransform on the volume and frames the camera to match.
+        scales: Dict[str, float] = {}
+        if pixel_size is not None and dz is not None and pixel_size > 0:
+            z_scale = dz / pixel_size
+            for zdim in ("z", "z_level"):
+                if zdim in data.dims:
+                    scales[zdim] = z_scale
+            logger.info(f"Voxel aspect ratio (Z/XY): {z_scale:.2f}")
 
         # {position: {"cmap", "name"}} from build_luts; ndv labels LUT rows by name
         luts = data.attrs.get("luts", {})
         channel_axis = data.dims.index("channel") if "channel" in data.dims else None
 
         # Recreate viewer with proper dimensions
-        # Note: 3D button is always enabled - Downsampling3DXarrayWrapper handles
-        # large volumes by automatically downsampling them for OpenGL rendering
+        # Note: 3D button is always enabled - ndv 0.5 downsamples volumes that
+        # exceed the GL texture limits itself (strided view, scales compensated)
         old_widget = self.ndv_viewer.widget()
         layout = self.layout()
 
@@ -3879,6 +3591,7 @@ class LightweightViewer(QWidget):
             channel_mode="composite",
             luts=luts,
             visible_axes=(-2, -1),  # 2D display (y, x), sliders for rest
+            scales=scales,
         )
 
         # Replace widget

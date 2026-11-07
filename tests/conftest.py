@@ -20,7 +20,7 @@ def _pin_gl_texture_limits() -> None:
     import ndv.views._vispy._util as util_mod
 
     def fixed_limits() -> tuple[int, int]:
-        # 3D = MAX_3D_TEXTURE_SIZE in core.py, so wrapper and ndv agree
+        # (2D, 3D) limits; 3D = 2048, the conservative GL_MAX_3D_TEXTURE_SIZE
         return (4096, 2048)
 
     util_mod.get_max_texture_sizes = fixed_limits
