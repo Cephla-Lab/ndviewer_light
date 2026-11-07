@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import tifffile  # noqa: E402
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from qtpy.QtWidgets import QApplication  # noqa: E402
 
 from ndviewer_light import LightweightViewer, detect_format  # noqa: E402
 from tests.ome_zarr_fixtures import (  # noqa: E402

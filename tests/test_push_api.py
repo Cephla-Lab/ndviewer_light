@@ -25,7 +25,7 @@ class TestPushModeDetectionReal:
 
     def test_push_start_activates_push_mode(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PyQt5.QtWidgets import QApplication
+        from qtpy.QtWidgets import QApplication
 
         from ndviewer_light import LightweightViewer
 
