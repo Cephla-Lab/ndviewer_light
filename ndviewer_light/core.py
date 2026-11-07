@@ -3098,53 +3098,48 @@ class LightweightViewer(QWidget):
         )
 
     def _try_inplace_ndv_update(self, data: "xr.DataArray") -> bool:
-        """Update ndv data in-place to avoid memory leak (ndv#209).
+        """Swap the displayed array inside the existing ndv viewer.
 
-        Bypasses ndv's data setter which leaks GPU handles. When the data
-        shape changes, emits dims_changed to trigger slider updates without
-        rebuilding the entire viewer.
+        Avoids the full rebuild in _set_ndv_data (new ArrayViewer + widget swap),
+        which flickers and on ndv 0.4 leaked GPU handles (ndv#209). Goes through
+        the public ``ArrayViewer.data_wrapper`` and the wrapper's documented
+        ``dims_changed`` / ``data_changed`` signals ("up to data wrappers, or even
+        end-users to emit"). ``DataWrapper`` has no public setter for the wrapped
+        array, so ``wrapper._data`` is the one private write here.
+
+        Signal order matters on ndv 0.5: ``dims_changed`` re-creates the sliders
+        and re-resolves the view, but that only re-fetches when the resolved index
+        changed, so a shape change at an unchanged index would keep the old
+        texture. ``data_changed`` always requests a re-fetch, so it is emitted on
+        every swap, after ``dims_changed`` when the shape changed.
 
         Args:
             data: The new xarray DataArray to display.
 
         Returns:
-            True if in-place update succeeded, False if caller should
-            fall back to _set_ndv_data() for a full viewer rebuild.
-
-        Note:
-            Relies on ndv internal APIs (_data_model.data_wrapper._data).
-            Tested with ndv 0.4.0. May need updating if ndv internals change.
+            True when the swap happened. False when there is no viewer or no data
+            wrapper yet, or an ndv signal handler raised; the caller then falls
+            back to _set_ndv_data() for a full rebuild.
         """
         v = self.ndv_viewer
         if v is None:
             return False
 
         try:
-            wrapper = v._data_model.data_wrapper
-            if wrapper._data is None:
+            wrapper = v.data_wrapper
+            if wrapper is None:
                 return False
 
-            shape_changed = wrapper._data.shape != data.shape
+            shape_changed = wrapper.data.shape != data.shape
             wrapper._data = data
 
             if shape_changed:
-                # Emit dims_changed signal to update slider ranges without full rebuild.
-                # In ndv, this signal triggers _fully_synchronize_view() which recreates
-                # sliders based on the new data shape.
                 wrapper.dims_changed.emit()
-            else:
-                v._request_data()
+            wrapper.data_changed.emit()
 
             return True
-        except AttributeError as e:
-            # Expected when ndv version doesn't have the expected internal structure
-            logger.debug("In-place update unavailable (ndv API mismatch): %s", e)
-            return False
         except Exception as e:
-            # Unexpected error - log for debugging but allow fallback
-            logger.warning(
-                "In-place ndv update failed unexpectedly: %s", e, exc_info=True
-            )
+            logger.warning("In-place ndv update failed: %s", e, exc_info=True)
             return False
 
     def _maybe_refresh(self):

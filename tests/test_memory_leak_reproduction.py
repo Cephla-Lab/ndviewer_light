@@ -2,9 +2,12 @@
 """
 Memory leak reproduction test for ndviewer_light in-place update fix.
 
-This script demonstrates the memory leak caused by ndv's data setter
+This script demonstrates the memory leak caused by ndv 0.4's data setter
 (https://github.com/pyapp-kit/ndv/issues/209) and validates that the
-fix in _try_inplace_ndv_update() prevents the leak.
+fix in _try_inplace_ndv_update() prevents the leak: the array is swapped
+inside the viewer's existing data wrapper (public ``ArrayViewer.data_wrapper``
+on ndv 0.5) and the wrapper's ``dims_changed`` / ``data_changed`` signals
+refresh sliders and texture.
 
 The test simulates the live refresh scenario where data is updated
 every 750ms during acquisition.
@@ -81,12 +84,14 @@ class MockSignal:
 class MockDataWrapper:
     """Mock ndv DataWrapper that simulates the real wrapper behavior.
 
-    Includes a dims_changed signal to match the real wrapper's interface.
+    Exposes the real wrapper's surface used by the swap: ``data`` (read-only
+    property over ``_data``) and the ``dims_changed`` / ``data_changed`` signals.
     """
 
     def __init__(self, data):
         self._data = data
         self.dims_changed = MockSignal()
+        self.data_changed = MockSignal()
 
     @property
     def data(self):
@@ -100,20 +105,24 @@ class MockArrayViewer:
     objects without cleaning up old ones (simulating the GPU handle leak).
     When use_leaky_setter=False, the data setter updates the wrapper
     in-place without creating new objects (no leak).
+
+    ``data_wrapper`` mirrors ndv 0.5's public property; ``data_changed``
+    emits on it are counted to show that every swap requested a refresh.
     """
 
     def __init__(self, initial_data, use_leaky_setter=True):
         self.use_leaky_setter = use_leaky_setter
-        self._data_model = type(
-            "DataModel", (), {"data_wrapper": MockDataWrapper(initial_data)}
-        )()
+        self._data_wrapper = MockDataWrapper(initial_data)
         self._leaked_handles = []
-        self._request_data_called = False
+
+    @property
+    def data_wrapper(self):
+        return self._data_wrapper
 
     @property
     def data(self):
-        if self._data_model.data_wrapper:
-            return self._data_model.data_wrapper.data
+        if self._data_wrapper is not None:
+            return self._data_wrapper.data
         return None
 
     @data.setter
@@ -122,7 +131,7 @@ class MockArrayViewer:
         if self.use_leaky_setter:
             # This is what ndv does - creates new wrapper without cleanup
             # The old wrapper's GPU handles are never freed
-            old_wrapper = self._data_model.data_wrapper
+            old_wrapper = self._data_wrapper
             if old_wrapper is not None:
                 # Simulate leaked GPU handle (in real ndv, this is vispy texture)
                 # We keep a reference to simulate the leak
@@ -135,14 +144,14 @@ class MockArrayViewer:
                     }
                 )
 
-            self._data_model.data_wrapper = MockDataWrapper(new_data)
+            self._data_wrapper = MockDataWrapper(new_data)
         else:
             # Non-leaky path (but this setter shouldn't be called with workaround)
-            self._data_model.data_wrapper._data = new_data
+            self._data_wrapper._data = new_data
 
-    def _request_data(self):
-        """Simulates triggering a display refresh."""
-        self._request_data_called = True
+    def get_data_changed_count(self):
+        """Return how many times data_changed was emitted on the current wrapper."""
+        return self._data_wrapper.data_changed._emit_count
 
     def get_leaked_handle_count(self):
         """Return number of leaked handles (for testing)."""
@@ -170,22 +179,22 @@ def simulate_new_code_path(viewer, new_data):
     """Simulate the NEW code that bypasses the setter (NO LEAK).
 
     This matches the actual _try_inplace_ndv_update implementation:
-    - Directly updates wrapper._data (bypasses leaky setter)
-    - Emits dims_changed when shape changes (updates sliders)
-    - Calls _request_data when shape unchanged (refreshes display)
+    - Reads the public viewer.data_wrapper
+    - Writes wrapper._data directly (bypasses the leaky setter)
+    - Emits dims_changed when the shape changes (re-creates sliders)
+    - Always emits data_changed afterwards (requests the texture re-fetch)
     """
     try:
-        wrapper = viewer._data_model.data_wrapper
-        if wrapper._data is None:
+        wrapper = viewer.data_wrapper
+        if wrapper is None:
             return False
 
-        shape_changed = wrapper._data.shape != new_data.shape
+        shape_changed = wrapper.data.shape != new_data.shape
         wrapper._data = new_data
 
         if shape_changed:
             wrapper.dims_changed.emit()
-        else:
-            viewer._request_data()
+        wrapper.data_changed.emit()
 
         return True
     except Exception:
@@ -286,6 +295,7 @@ def run_memory_test(iterations, use_old_code, data_shape=(1, 1, 5, 3, 256, 256))
         "final_process_mb": final_process_mb,
         "leaked_handle_count": viewer.get_leaked_handle_count(),
         "leaked_memory_mb": viewer.get_leaked_memory_mb(),
+        "data_changed_emits": viewer.get_data_changed_count(),
         "memory_samples": memory_samples,
     }
 
@@ -300,6 +310,7 @@ def run_memory_test(iterations, use_old_code, data_shape=(1, 1, 5, 3, 256, 256))
         print(f"Process memory: {initial_process_mb:.1f}MB -> {final_process_mb:.1f}MB")
     print(f"Leaked handles: {results['leaked_handle_count']}")
     print(f"Leaked memory (simulated): {results['leaked_memory_mb']:.1f}MB")
+    print(f"data_changed emits on the live wrapper: {results['data_changed_emits']}")
     print(f"{'='*60}\n")
 
     return results
@@ -338,6 +349,12 @@ def run_comparison_test(iterations):
     old_leaked = old_results["leaked_handle_count"] > 0
     new_leaked = new_results["leaked_handle_count"] > 0
 
+    if new_results["data_changed_emits"] != iterations:
+        print(
+            f"\nFAILURE: New code emitted data_changed "
+            f"{new_results['data_changed_emits']} times for {iterations} swaps!"
+        )
+        return 1
     if old_leaked and not new_leaked:
         print("\nSUCCESS: New code eliminates the memory leak!")
         print(
@@ -369,9 +386,15 @@ def run_single_test(iterations, use_old_code):
             print("No leak detected (unexpected for old code)")
         return 0 if leaked else 1
     else:
-        # For new code, we expect no leaks
+        # For new code, we expect no leaks and one refresh request per swap
         if leaked:
             print(f"LEAK DETECTED: {results['leaked_handle_count']} handles leaked")
+            return 1
+        if results["data_changed_emits"] != iterations:
+            print(
+                f"REFRESH MISSING: data_changed emitted "
+                f"{results['data_changed_emits']} times for {iterations} swaps"
+            )
             return 1
         print("No leak detected (fix working correctly)")
         return 0
