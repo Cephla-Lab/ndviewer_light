@@ -367,10 +367,6 @@ except ImportError as e:
 # OpenGL 3D texture size limit (conservative estimate for most GPUs)
 MAX_3D_TEXTURE_SIZE = 2048
 
-# Channel label update retry configuration
-CHANNEL_LABEL_UPDATE_MAX_RETRIES = 20
-CHANNEL_LABEL_UPDATE_RETRY_DELAY_MS = 100
-
 # Register custom DataWrapper for automatic 3D downsampling
 if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
     from collections.abc import Mapping
@@ -1042,6 +1038,38 @@ def hex_to_colormap(hex_color: str) -> str:
     return best_colormap
 
 
+def build_luts(
+    channel_names: List[str], channel_colors: Optional[List[str]] = None
+) -> Dict[int, Dict[str, Any]]:
+    """ndv LUTModel kwargs per channel position: colormap + display name.
+
+    The result is stored in ``attrs["luts"]`` and passed to ``ndv.ArrayViewer(luts=...)``.
+    ndv labels each LUT row from the public ``LUTModel.name`` field, falling back to the
+    channel coordinate ("0", "1", ...) when it is empty; our channel coordinates are
+    integer positions, so the name has to be here. ``cmap`` is always set because ndv
+    applies its default colour cycle to any LUT whose ``cmap`` was left unset.
+
+    Args:
+        channel_names: Display name per channel position.
+        channel_colors: Optional hex colour per position (``"#20ADF8"`` / ``"20ADF8"``);
+            a missing or empty entry falls back to the wavelength-derived colormap.
+    """
+    luts: Dict[int, Dict[str, Any]] = {}
+    for i, name in enumerate(channel_names):
+        color = (
+            channel_colors[i]
+            if channel_colors and i < len(channel_colors) and channel_colors[i]
+            else None
+        )
+        cmap = (
+            hex_to_colormap(color)
+            if color
+            else wavelength_to_colormap(extract_wavelength(name))
+        )
+        luts[i] = {"cmap": cmap, "name": name}
+    return luts
+
+
 def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
     """Parse OME-NGFF metadata from zarr v3 store.
 
@@ -1539,10 +1567,6 @@ class LightweightViewer(QWidget):
         self._open_handles = []  # Keep tif handles alive when mmap is used
         self._last_sig = None
         self._refresh_timer = None
-        self._channel_label_generation = 0  # Generation counter for retry cancellation
-        self._pending_channel_label_retries = (
-            0  # Retry counter for channel label updates
-        )
 
         # External navigation state (push-based API for live acquisition)
         # _file_index is accessed from both main thread and dask workers, needs lock
@@ -1562,7 +1586,7 @@ class LightweightViewer(QWidget):
         self._push_mode_started: bool = False
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
-        self._luts: Dict[int, Any] = {}  # channel_idx -> colormap
+        self._luts: Dict[int, Any] = {}  # channel_idx -> LUTModel kwargs (cmap, name)
         self._current_fov_idx: int = 0
         self._current_time_idx: int = 0
         self._max_time_idx: int = 0  # Highest t seen (for slider range)
@@ -1859,11 +1883,8 @@ class LightweightViewer(QWidget):
         self._fov_labels = list(fov_labels)
         self._push_mode_started = True
 
-        # Set up LUTs based on channel wavelengths
-        self._luts = {
-            i: wavelength_to_colormap(extract_wavelength(c))
-            for i, c in enumerate(self._channel_names)
-        }
+        # Colormap + display name per channel (ndv labels LUT rows by LUTModel.name)
+        self._luts = build_luts(self._channel_names)
 
         # Reset navigation state
         self._current_fov_idx = 0
@@ -2378,11 +2399,8 @@ class LightweightViewer(QWidget):
         # Build channel name to index map
         self._zarr_channel_map = {name: i for i, name in enumerate(self._channel_names)}
 
-        # Set up LUTs based on channel wavelengths
-        self._luts = {
-            i: wavelength_to_colormap(extract_wavelength(c))
-            for i, c in enumerate(self._channel_names)
-        }
+        # Colormap + display name per channel (ndv labels LUT rows by LUTModel.name)
+        self._luts = build_luts(self._channel_names)
 
         # Note: Zarr stores are opened lazily in _load_zarr_plane to avoid
         # blocking I/O at acquisition start. The store may not exist yet when
@@ -2511,11 +2529,8 @@ class LightweightViewer(QWidget):
         # Build channel name to index map
         self._zarr_channel_map = {name: i for i, name in enumerate(self._channel_names)}
 
-        # Set up LUTs based on channel wavelengths
-        self._luts = {
-            i: wavelength_to_colormap(extract_wavelength(c))
-            for i, c in enumerate(self._channel_names)
-        }
+        # Colormap + display name per channel (ndv labels LUT rows by LUTModel.name)
+        self._luts = build_luts(self._channel_names)
 
         # Clear per-FOV state (not used in 6d_regions mode)
         self._zarr_fov_paths = []
@@ -3173,8 +3188,6 @@ class LightweightViewer(QWidget):
         # When structure changes (e.g., different channels), we must rebuild the viewer
         # to avoid stale channel controls persisting from the previous dataset.
         if not structure_changed and self._try_inplace_ndv_update(data):
-            # Update channel labels for the new data
-            self._initiate_channel_label_update()
             # Close old handles after successful swap.
             self._close_tiff_handles(old_handles)
             return
@@ -3485,7 +3498,8 @@ class LightweightViewer(QWidget):
             elif len(channel_names) > n_c:
                 channel_names = channel_names[:n_c]
             # Keep coordinates numeric (indices) for all axes, including "channel";
-            # channel names are stored in attrs and applied via _lut_controllers.
+            # channel names travel in attrs["channel_names"] and reach ndv as
+            # LUTModel.name through attrs["luts"] (see build_luts).
             # This convention is used consistently for both OME-TIFF and single-TIFF paths.
             coords_base = {
                 axis_map.get(ax, f"ax_{ax}"): list(range(dim))
@@ -3500,10 +3514,7 @@ class LightweightViewer(QWidget):
                 else:
                     chunks.append(1)
 
-            luts = {
-                i: wavelength_to_colormap(extract_wavelength(name))
-                for i, name in enumerate(channel_names)
-            }
+            luts = build_luts(channel_names)
             n_fov = len(fovs)
 
             def open_zarr(path: str):
@@ -3629,10 +3640,7 @@ class LightweightViewer(QWidget):
                 logger.debug("Failed to read sample TIFF: %s", e)
                 return None
 
-            luts = {
-                i: wavelength_to_colormap(extract_wavelength(c))
-                for i, c in enumerate(channel_names)
-            }
+            luts = build_luts(channel_names)
 
             @lru_cache(maxsize=128)
             def load_plane(t, region, fov, z, channel):
@@ -3686,7 +3694,8 @@ class LightweightViewer(QWidget):
                 stacked,
                 dims=["time", "fov", "z", "channel", "y", "x"],
                 # Use actual values for time/z coords, numeric indices for fov/channel.
-                # Channel names are stored in attrs and applied via _lut_controllers.
+                # Channel names travel in attrs["channel_names"] and reach ndv as
+                # LUTModel.name through attrs["luts"] (see build_luts).
                 coords={
                     "time": times,
                     "fov": list(range(n_fov)),
@@ -3766,13 +3775,7 @@ class LightweightViewer(QWidget):
         if len(channel_names) != n_c:
             channel_names = [f"Ch{i}" for i in range(n_c)]
 
-        channel_colors = image.channel_colors
-        luts = {}
-        for i, name in enumerate(channel_names):
-            if i < len(channel_colors) and channel_colors[i]:
-                luts[i] = hex_to_colormap(channel_colors[i])
-            else:
-                luts[i] = wavelength_to_colormap(extract_wavelength(name))
+        luts = build_luts(channel_names, image.channel_colors)
 
         xarr = xr.DataArray(
             darr,
@@ -3875,6 +3878,7 @@ class LightweightViewer(QWidget):
         else:
             _current_voxel_scale = None
 
+        # {position: {"cmap", "name"}} from build_luts; ndv labels LUT rows by name
         luts = data.attrs.get("luts", {})
         channel_axis = data.dims.index("channel") if "channel" in data.dims else None
 
@@ -3897,93 +3901,6 @@ class LightweightViewer(QWidget):
         layout.removeWidget(old_widget)
         old_widget.deleteLater()
         layout.insertWidget(idx, self.ndv_viewer.widget(), 1)
-
-        # Update channel labels after viewer is ready.
-        self._initiate_channel_label_update()
-
-    def _initiate_channel_label_update(self):
-        """Start the channel label update retry mechanism.
-
-        Increments generation to cancel any pending retries from previous loads,
-        then schedules retry attempts until NDV viewer is ready.
-        """
-        self._channel_label_generation += 1
-        self._pending_channel_label_retries = CHANNEL_LABEL_UPDATE_MAX_RETRIES
-        self._schedule_channel_label_update(self._channel_label_generation)
-
-    def _schedule_channel_label_update(self, generation: int):
-        """Retry updating channel labels until the NDV viewer is ready or we time out."""
-        # Check if this callback is from a stale generation (viewer was replaced)
-        if self._channel_label_generation != generation:
-            return
-
-        if not self.ndv_viewer or self._xarray_data is None:
-            return
-
-        remaining = self._pending_channel_label_retries
-        if remaining <= 0:
-            logger.warning(
-                "Channel label update timed out - labels may show numeric indices"
-            )
-            return
-
-        # Check if _lut_controllers is available (indicates viewer is ready).
-        # Note: _lut_controllers is a private API that may change in future ndv versions;
-        # at the time of writing there is no stable public API for this behavior in ndv.
-        # If removed or renamed, this retry loop will timeout gracefully and channel
-        # labels will not be updated, falling back to numeric indices in the UI.
-        controllers = getattr(self.ndv_viewer, "_lut_controllers", None)
-        if controllers:
-            self._update_channel_labels()
-            return
-
-        # Not ready yet; schedule another check
-        self._pending_channel_label_retries = remaining - 1
-        QTimer.singleShot(
-            CHANNEL_LABEL_UPDATE_RETRY_DELAY_MS,
-            lambda: self._schedule_channel_label_update(generation),
-        )
-
-    def _update_channel_labels(self):
-        """Manually update channel labels in the NDV viewer.
-
-        This uses ndv's private _lut_controllers API to set display names.
-        The approach is fragile and may break with future ndv updates.
-        """
-        if not self.ndv_viewer or self._xarray_data is None:
-            return
-
-        channel_names = self._xarray_data.attrs.get("channel_names", [])
-        if not channel_names:
-            return
-
-        try:
-            controllers = getattr(self.ndv_viewer, "_lut_controllers", None)
-            if not controllers:
-                return
-
-            updated_names = []
-            for i, name in enumerate(channel_names):
-                if i in controllers:
-                    controller = controllers[i]
-                    controller.key = name
-                    if hasattr(controller, "synchronize"):
-                        # Propagate the updated key to the NDV UI so the channel
-                        # label is displayed in the LUT controls.
-                        controller.synchronize()
-                    else:
-                        logger.warning(
-                            "LUT controller at index %d has no 'synchronize' method; "
-                            "channel label '%s' may not appear in UI",
-                            i,
-                            name,
-                        )
-                    updated_names.append(name)
-            logger.debug(
-                "Updated %d channel labels: %s", len(updated_names), updated_names
-            )
-        except Exception as e:
-            logger.debug("Failed to update channel labels: %s", e)
 
 
 class LightweightMainWindow(QMainWindow):

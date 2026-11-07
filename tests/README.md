@@ -38,7 +38,7 @@ pytest tests/test_channel_names.py::TestOMETiffChannelNamesLogic::test_empty_cha
 
 ### test_channel_names.py
 
-Comprehensive unit tests for the channel name display feature. Tests cover five main areas:
+Comprehensive unit tests for the channel name display feature. Tests cover four main areas:
 
 #### 1. OME-TIFF Channel Name Logic (`TestOMETiffChannelNamesLogic`)
 
@@ -59,28 +59,19 @@ Tests channel name extraction from single-TIFF filenames (in `_load_single_tiff`
 - **Set to list conversion**: Tests the conversion from set (during discovery) to sorted list
 - **Storage in attrs**: Verifies channel names are properly stored in xarray attrs
 
-#### 3. Retry Mechanism (`TestChannelLabelRetryMechanism`)
+#### 3. Channel Names Reaching ndv (`TestChannelNamesReachNdv`)
 
-Tests the retry mechanism for updating channel labels in the NDV viewer (in `_set_ndv_data` and `_schedule_channel_label_update` methods):
+ndv 0.5 labels each LUT row from the public `LUTModel.name` field and falls back to the channel coordinate (`"0"`, `"1"`, ...) when it is empty. ndviewer_light keeps integer channel coordinates, so `build_luts(channel_names, channel_colors)` in `core.py` pairs every channel position with `{"cmap": ..., "name": ...}`; that dict is stored in `attrs["luts"]` and passed to `ndv.ArrayViewer(luts=...)` in `_set_ndv_data`. There is no retry loop and no private ndv access any more.
 
-- **Generation counter**: Tests that generation counter increments with each update
-- **Pending retries initialization**: Tests that retry counter is reset to 20 on each update
-- **Stale callback detection**: Tests that callbacks with old generation numbers are detected and ignored
-- **Current generation processing**: Tests that callbacks with current generation proceed normally
-- **Retry decrement**: Tests that retry counter decrements on each attempt
-- **Timeout detection**: Tests that retries stop when counter reaches 0
+- **`build_luts` pairing**: Pure test of the helper (wavelength-derived colormap, hex colour override, fallback for missing/empty colours)
+- **Push-mode names**: `start_acquisition(["BF", "GFP"], ...)` leaves `display_model.luts[i].name == "BF" / "GFP"` right after construction
+- **OME-Zarr plate names**: `load_dataset` on a `write_plate(...)` store carries the omero channel labels into the model the same way
+- **Checkbox labels**: polls the event loop (up to 3 s with `processEvents()`, never `sleep`) until the LUT rows ndv creates on its first data response show the names
+- **No private access**: `core.py` contains no `_lut_controllers` reference
 
-The generation counter mechanism is critical for preventing stale callbacks from previous data loads from interfering with new loads. When a new dataset is loaded, the generation increments, causing all pending callbacks from the previous load to exit early.
+The viewer tests construct a real `LightweightViewer` under `QT_QPA_PLATFORM=offscreen`; `conftest.py` pins ndv's GL texture-size query so this works without a GL context.
 
-#### 4. Channel Label Update Logic (`TestChannelLabelUpdate`)
-
-Tests the logic that applies channel names to NDV LUT controllers (in `_update_channel_labels` method):
-
-- **Setting controller keys**: Tests that channel names are correctly assigned to controller.key
-- **Fewer controllers than names**: Tests graceful handling when there are more channel names than controllers
-- **Missing controller indices**: Tests that missing indices are skipped without errors
-
-#### 5. Integration Tests (`TestChannelNamesIntegration`)
+#### 4. Integration Tests (`TestChannelNamesIntegration`)
 
 Tests the end-to-end behavior of channel name handling:
 
@@ -91,17 +82,17 @@ Tests the end-to-end behavior of channel name handling:
 
 ## Test Philosophy
 
-These tests follow a **logic-focused** approach rather than integration testing:
+The name-processing tests follow a **logic-focused** approach, and the ndv-facing tests check the public model:
 
-1. **Isolated from Qt**: Tests avoid Qt initialization to prevent crashes and improve speed
-2. **Logic verification**: Tests directly verify the channel name processing logic by simulating the same code paths
-3. **Edge case coverage**: Comprehensive coverage of boundary conditions (empty, fewer, more, exact match)
-4. **Clear documentation**: Each test has a descriptive name and docstring explaining what it verifies
+1. **Logic verification**: Tests directly verify the channel name processing logic by simulating the same code paths
+2. **Public ndv API only**: Where a test needs ndv, it asserts on `display_model.luts[i].name` (public) and the widget text, never on ndv internals
+3. **Headless**: Viewer tests run offscreen; anything that needs the event loop polls with `processEvents()` instead of sleeping
+4. **Edge case coverage**: Comprehensive coverage of boundary conditions (empty, fewer, more, exact match)
+5. **Clear documentation**: Each test has a descriptive name and docstring explaining what it verifies
 
 This approach ensures:
-- Fast test execution (typically under 1 second for the full suite)
-- No dependency on GUI components
-- Clear verification of business logic
+- Fast test execution (a few seconds for the full suite)
+- Clear verification of business logic and of what ndv is actually given
 - Easy debugging when tests fail
 
 ## Test Organization
@@ -109,10 +100,9 @@ This approach ensures:
 Tests are organized into classes by functional area:
 - `TestOMETiffChannelNamesLogic`: OME-TIFF path logic
 - `TestSingleTiffChannelNamesLogic`: Single-TIFF path logic
-- `TestChannelLabelRetryMechanism`: Retry and generation counter logic
-- `TestChannelLabelUpdate`: Controller update logic
+- `TestChannelNamesReachNdv`: `build_luts` and the names ndv holds in `LUTModel.name`
 - `TestChannelNamesIntegration`: End-to-end integration tests
 
 ## Code References
 
-Each test includes comments referencing the relevant methods in `ndviewer_light.py` that implement the tested logic, making it easy to trace tests back to the implementation using IDE navigation (e.g., "Go to Definition").
+Each test includes comments referencing the relevant methods in `ndviewer_light/core.py` that implement the tested logic, making it easy to trace tests back to the implementation using IDE navigation (e.g., "Go to Definition").
