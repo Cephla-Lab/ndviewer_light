@@ -390,6 +390,23 @@ class TestExistingButUnreadable:
         with pytest.raises(OmeZarrError, match="r2"):
             discover_ome_zarr(tmp_path / "run")
 
+    def test_region_store_without_metadata_is_an_error(self, tmp_path):
+        axes = [{"name": "fov", "type": "fov"}] + SQUID_AXES
+        for region in ("r1", "r2"):
+            write_image_group(
+                tmp_path / "run" / "zarr" / region / "acquisition.zarr",
+                (2, 1, 2, 3, 8, 8),
+                axes,
+                dataset_path=".",
+                node_type="array",
+                dimension_names=["fov", "t", "c", "z", "y", "x"],
+            )
+        (
+            tmp_path / "run" / "zarr" / "r2" / "acquisition.zarr" / "zarr.json"
+        ).unlink()  # the store exists, its metadata is gone
+        with pytest.raises(OmeZarrError, match="r2"):
+            discover_ome_zarr(tmp_path / "run")
+
     def test_unreadable_plate_metadata_is_an_error(self, tmp_path):
         write_plate(
             tmp_path / "run" / "plate.ome.zarr", {"B3": [0]}, rows=["B"], cols=[3]
@@ -408,7 +425,10 @@ class TestLegacyRankInference:
             ((3, 8, 8), ["z", "y", "x"]),
             ((2, 3, 8, 8), ["c", "z", "y", "x"]),
             ((1, 2, 3, 8, 8), ["t", "c", "z", "y", "x"]),
-            ((2, 1, 2, 3, 8, 8), ["fov", "t", "c", "z", "y", "x"]),
+            (
+                (2, 1, 2, 3, 8, 8),
+                ["t", "fov", "c", "z", "y", "x"],
+            ),  # main's order for axes-less 6D stores
         ],
     )
     def test_dims_from_the_array_rank(self, tmp_path, shape, expected):

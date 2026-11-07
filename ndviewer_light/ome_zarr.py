@@ -363,7 +363,12 @@ def _discover_experiment_folder(root: Path):
             images.append(image)
             entries.append(_entry(region_dir.name, fov, image))
         acquisition = region_dir / "acquisition.zarr"
-        if "multiscales" in (_ome_attrs_strict(acquisition) or {}):
+        # An existing store directory must carry metadata: missing or unreadable zarr.json is a broken
+        # store (raised with its path), only an absent directory means "no 6D store here".
+        acquisition_ome = (
+            (_read_ome(acquisition).get("ome") or {}) if acquisition.is_dir() else {}
+        )
+        if "multiscales" in acquisition_ome:
             image = _parse_existing_image(acquisition)
             images.append(image)
             entries.append(_entry(region_dir.name, 0, image))
@@ -402,7 +407,14 @@ _LEGACY_DIMS_BY_RANK = {
     3: ["z", "y", "x"],
     4: ["c", "z", "y", "x"],
     5: ["t", "c", "z", "y", "x"],
-    6: ["fov", "t", "c", "z", "y", "x"],
+    6: [
+        "t",
+        "fov",
+        "c",
+        "z",
+        "y",
+        "x",
+    ],  # the order the pre-0.5 loaders assumed for axes-less 6D stores
 }
 
 
