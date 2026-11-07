@@ -62,3 +62,12 @@ viewer = LightweightViewer("/path/to/dataset")
 window = LightweightMainWindow("/path/to/dataset")
 window.show()
 ```
+
+## Supported formats
+
+- **OME-Zarr 0.5 (Zarr v3)**: a plate, well or image group, opened directly or inside a Squid experiment folder. Datasets, axes and pixel sizes are read from the store's metadata.
+- **Squid's 6D layout** (time, FOV, z, channel, y, x).
+- **OME-TIFF**.
+- **Single TIFF**.
+
+An array whose planned planes were not all written is labelled "(incomplete acquisition)".

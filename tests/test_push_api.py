@@ -20,28 +20,22 @@ from unittest.mock import MagicMock
 import numpy as np
 
 
-class TestPushModeDetection:
-    """Tests for is_push_mode_active() method."""
+class TestPushModeDetectionReal:
+    """is_push_mode_active() on a real viewer."""
 
-    def test_push_mode_inactive_when_no_fov_labels(self):
-        """Push mode is inactive when _fov_labels is empty."""
+    def test_push_start_activates_push_mode(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt5.QtWidgets import QApplication
+
         from ndviewer_light import LightweightViewer
 
-        viewer = MagicMock(spec=LightweightViewer)
-        viewer._fov_labels = []
-        viewer.is_push_mode_active = lambda: bool(viewer._fov_labels)
-
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        viewer = LightweightViewer()
         assert viewer.is_push_mode_active() is False
-
-    def test_push_mode_active_when_fov_labels_set(self):
-        """Push mode is active when _fov_labels has values."""
-        from ndviewer_light import LightweightViewer
-
-        viewer = MagicMock(spec=LightweightViewer)
-        viewer._fov_labels = ["A1:0", "A1:1", "A2:0"]
-        viewer.is_push_mode_active = lambda: bool(viewer._fov_labels)
-
+        viewer.start_acquisition(["BF"], 1, 8, 8, ["A1:0", "A1:1"])
         assert viewer.is_push_mode_active() is True
+        viewer.end_acquisition()
+        assert viewer.is_push_mode_active() is True  # navigation after the run
 
 
 class TestStartAcquisition:
