@@ -3240,16 +3240,7 @@ class LightweightViewer(QWidget):
                 # Always do full rebuild when explicitly loading a new dataset.
                 # This ensures channels/LUTs are properly reset.
                 self._set_ndv_data(data)
-
-                # Update status (keep it stable during live acquisition; avoid printing dims like time=...)
-                name = Path(path).name
-                if self._acquisition_incomplete:
-                    logger.info("%s: acquisition incomplete or aborted", path)
-                    self.status_label.setText(
-                        f"Loaded: {name} (incomplete acquisition)"
-                    )
-                else:
-                    self.status_label.setText(f"Loaded: {name}")
+                self._show_loaded_status()
             else:
                 self.status_label.setText("Failed to load dataset")
         except Exception as e:
@@ -3355,6 +3346,19 @@ class LightweightViewer(QWidget):
         self._acquisition_incomplete = bool(
             data.attrs.get("_acquisition_incomplete", False)
         )
+        self._show_loaded_status()
+
+    def _show_loaded_status(self) -> None:
+        """Status text for the data on show: the dataset name, plus the incomplete label when it applies.
+
+        Called whenever pull-mode data is accepted (load and refresh), so the label follows the flag.
+        """
+        name = Path(self.dataset_path).name
+        if self._acquisition_incomplete:
+            logger.info("%s: acquisition incomplete or aborted", self.dataset_path)
+            self.status_label.setText(f"Loaded: {name} (incomplete acquisition)")
+        else:
+            self.status_label.setText(f"Loaded: {name}")
 
     def _create_lazy_array(self, base_path: Path) -> "Optional[xr.DataArray]":
         """Create lazy xarray from dataset - auto-detects format."""

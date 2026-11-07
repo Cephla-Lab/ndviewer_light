@@ -1,8 +1,10 @@
 """LightweightViewer loads OME-Zarr 0.5 stores by their metadata."""
 
+import json
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -280,3 +282,40 @@ def test_upper_case_dimension_names_do_not_warn(qapp, tmp_path, caplog):
         v = load(qapp, tmp_path / "i")
     assert v._xarray_data is not None
     assert "dimension_names" not in caplog.text
+
+
+def test_refresh_updates_the_incomplete_label(qapp, tmp_path):
+    write_plate(
+        tmp_path / "p",
+        {"B3": [0]},
+        rows=["B"],
+        cols=[3],
+        squid={"acquisition_complete": False},
+    )
+    v = load(qapp, tmp_path / "p")
+    assert v.status_label.text() == "Loaded: p (incomplete acquisition)"
+    field_json = tmp_path / "p" / "B" / "3" / "0" / "zarr.json"
+    node = json.loads(field_json.read_text())
+    node["attributes"]["_squid"]["acquisition_complete"] = True
+    field_json.write_text(json.dumps(node))
+    os.utime(
+        field_json, (time.time() + 5, time.time() + 5)
+    )  # a new signature for the refresh
+    v.refresh()
+    assert v._acquisition_incomplete is False
+    assert v.status_label.text() == "Loaded: p"
+
+
+def test_legacy_4d_store_without_axes_loads(qapp, tmp_path):
+    write_legacy_image(
+        tmp_path / "run" / "zarr" / "r" / "acquisition.zarr", (2, 3, 8, 8), axes=None
+    )
+    v = load(qapp, tmp_path / "run")
+    assert dict(v._xarray_data.sizes) == {
+        "time": 1,
+        "fov": 1,
+        "z": 3,
+        "channel": 2,
+        "y": 8,
+        "x": 8,
+    }

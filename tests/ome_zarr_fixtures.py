@@ -189,19 +189,19 @@ def write_plate(
             write_image_group(well_dir / str(f), **image_kwargs)
 
 
-def write_legacy_image(group: Path, shape: tuple = (1, 2, 3, 8, 8)) -> None:
-    """Write a pre-0.5 Squid store: root-level multiscales, _squid_metadata, array "0"."""
+def write_legacy_image(
+    group: Path, shape: tuple = (1, 2, 3, 8, 8), axes=SQUID_AXES
+) -> None:
+    """Write a pre-0.5 Squid store: root-level multiscales, _squid_metadata, array "0".
+
+    ``axes=None`` writes no axes at all (the oldest stores), so the reader must infer them from the rank.
+    """
     group = Path(group)
+    multiscale = {"datasets": [{"path": "0"}]}
+    if axes is not None:
+        multiscale["axes"] = axes
     _write_group(
         group,
-        {
-            "multiscales": [
-                {
-                    "axes": SQUID_AXES,
-                    "datasets": [{"path": "0"}],
-                }
-            ],
-            "_squid_metadata": {"pixel_size_um": 0.65},
-        },
+        {"multiscales": [multiscale], "_squid_metadata": {"pixel_size_um": 0.65}},
     )
     write_array(group / "0", shape)

@@ -16,7 +16,12 @@ from ndviewer_light.ome_zarr import (
     parse_image,
     read_node_attrs,
 )
-from tests.ome_zarr_fixtures import SQUID_AXES, write_image_group, write_plate
+from tests.ome_zarr_fixtures import (
+    SQUID_AXES,
+    write_image_group,
+    write_legacy_image,
+    write_plate,
+)
 
 
 def _space(name):
@@ -363,3 +368,52 @@ class TestDiscover:
         assert image.version is None and image.aborted is False
         assert image.acquisition_complete is False
         assert image.channel_names == ["a"]
+
+
+class TestExistingButUnreadable:
+    """A node that exists but cannot be read is broken, never silently dropped (review of PR #42)."""
+
+    def test_unreadable_region_metadata_is_an_error(self, tmp_path):
+        axes = [{"name": "fov", "type": "fov"}] + SQUID_AXES
+        for region in ("r1", "r2"):
+            write_image_group(
+                tmp_path / "run" / "zarr" / region / "acquisition.zarr",
+                (2, 1, 2, 3, 8, 8),
+                axes,
+                dataset_path=".",
+                node_type="array",
+                dimension_names=["fov", "t", "c", "z", "y", "x"],
+            )
+        (
+            tmp_path / "run" / "zarr" / "r2" / "acquisition.zarr" / "zarr.json"
+        ).write_text("{not json")
+        with pytest.raises(OmeZarrError, match="r2"):
+            discover_ome_zarr(tmp_path / "run")
+
+    def test_unreadable_plate_metadata_is_an_error(self, tmp_path):
+        write_plate(
+            tmp_path / "run" / "plate.ome.zarr", {"B3": [0]}, rows=["B"], cols=[3]
+        )
+        (tmp_path / "run" / "plate.ome.zarr" / "zarr.json").write_text("{not json")
+        with pytest.raises(OmeZarrError, match="plate.ome.zarr"):
+            discover_ome_zarr(tmp_path / "run")
+
+
+class TestLegacyRankInference:
+    """Pre-0.5 stores without axes metadata: dims come from the array's rank, as the old loaders did."""
+
+    @pytest.mark.parametrize(
+        "shape, expected",
+        [
+            ((3, 8, 8), ["z", "y", "x"]),
+            ((2, 3, 8, 8), ["c", "z", "y", "x"]),
+            ((1, 2, 3, 8, 8), ["t", "c", "z", "y", "x"]),
+            ((2, 1, 2, 3, 8, 8), ["fov", "t", "c", "z", "y", "x"]),
+        ],
+    )
+    def test_dims_from_the_array_rank(self, tmp_path, shape, expected):
+        write_legacy_image(tmp_path / "old.zarr", shape, axes=None)
+        image = image_from_legacy(
+            tmp_path / "old.zarr", {"axes": [], "pixel_size_um": 0.65}
+        )
+        assert image.dim_names == expected

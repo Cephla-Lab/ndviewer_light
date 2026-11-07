@@ -234,6 +234,17 @@ def _ome_attrs(path: Path) -> Optional[dict]:
         return None
 
 
+def _ome_attrs_strict(path: Path) -> Optional[dict]:
+    """The ``ome`` dict of an existing node, None when there is no node at all (no zarr.json).
+
+    Unlike _ome_attrs, a node that exists but cannot be read raises OmeZarrError naming it:
+    inside a recognised layout a broken region or plate is never silently dropped.
+    """
+    if not (Path(path) / "zarr.json").exists():
+        return None
+    return _read_ome(Path(path)).get("ome") or {}
+
+
 def is_ome_zarr_node(path: Path) -> bool:
     """True when ``path/zarr.json`` carries ome.plate, ome.well or ome.multiscales."""
     ome = _ome_attrs(Path(path))
@@ -332,7 +343,7 @@ def _discover_experiment_folder(root: Path):
     """Plate, or zarr/<region>/{fov_<n>.ome.zarr, acquisition.zarr}; None if neither."""
     for name in ("plate.ome.zarr", "plate.zarr"):
         plate_dir = root / name
-        plate = (_ome_attrs(plate_dir) or {}).get("plate")
+        plate = (_ome_attrs_strict(plate_dir) or {}).get("plate")
         if plate is not None:
             return _discover_plate(plate_dir, plate), "hcs_plate"
 
@@ -352,7 +363,7 @@ def _discover_experiment_folder(root: Path):
             images.append(image)
             entries.append(_entry(region_dir.name, fov, image))
         acquisition = region_dir / "acquisition.zarr"
-        if "multiscales" in (_ome_attrs(acquisition) or {}):
+        if "multiscales" in (_ome_attrs_strict(acquisition) or {}):
             image = _parse_existing_image(acquisition)
             images.append(image)
             entries.append(_entry(region_dir.name, 0, image))
@@ -386,10 +397,31 @@ def discover_ome_zarr(root: Path) -> Tuple[List[dict], str]:
     return found if found is not None else ([], "unknown")
 
 
+_LEGACY_DIMS_BY_RANK = {
+    2: ["y", "x"],
+    3: ["z", "y", "x"],
+    4: ["c", "z", "y", "x"],
+    5: ["t", "c", "z", "y", "x"],
+    6: ["fov", "t", "c", "z", "y", "x"],
+}
+
+
+def _legacy_dims_from_rank(path: Path) -> List[str]:
+    """Dims of a pre-0.5 store without axes metadata, from the rank of its array "0" (as the old loaders did)."""
+    try:
+        with open(path / "0" / "zarr.json") as f:
+            rank = len(json.load(f)["shape"])
+    except (OSError, ValueError, KeyError, TypeError):
+        rank = 5
+    return list(_LEGACY_DIMS_BY_RANK.get(rank, _LEGACY_DIMS_BY_RANK[5]))
+
+
 def image_from_legacy(path: Path, meta: dict) -> OmeZarrImage:
     """Describe a pre-0.5 store from the dict ``core.parse_zarr_v3_metadata`` returns."""
     axes = meta.get("axes") or []
-    dim_names = normalise_axis_names(axes) if axes else ["t", "c", "z", "y", "x"]
+    dim_names = (
+        normalise_axis_names(axes) if axes else _legacy_dims_from_rank(Path(path))
+    )
     scale_um: Dict[str, float] = {}
     if meta.get("pixel_size_um") is not None:
         scale_um["y"] = scale_um["x"] = meta["pixel_size_um"]
