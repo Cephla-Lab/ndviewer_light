@@ -79,6 +79,15 @@ if TYPE_CHECKING:
 
 import tensorstore as ts
 
+from .ome_zarr import (
+    OmeZarrError,
+    OmeZarrImage,
+    array_dimension_names,
+    discover_ome_zarr,
+    image_from_legacy,
+    is_ome_zarr_node,
+)
+
 # Constants
 TIFF_EXTENSIONS = {".tif", ".tiff"}
 LIVE_REFRESH_INTERVAL_MS = 750
@@ -345,7 +354,14 @@ try:
     from scipy.ndimage import zoom as ndimage_zoom
 
     LAZY_LOADING_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    import warnings
+
+    warnings.warn(
+        f"Lazy loading disabled: missing dependency '{e.name}'. "
+        f"Install it with: pip install {e.name}",
+        stacklevel=1,
+    )
     LAZY_LOADING_AVAILABLE = False
 
 # OpenGL 3D texture size limit (conservative estimate for most GPUs)
@@ -842,6 +858,10 @@ def detect_format(base_path: Path) -> str:
     OME-TIFF is detected by .ome.tif* files.
     Falls back to single_tiff if neither is detected.
     """
+    # Any OME-Zarr node (plate, well or image group), whatever its name
+    if is_ome_zarr_node(base_path):
+        return "zarr_v3"
+
     # Check for zarr v3 formats
     # 1. HCS plate format: plate.zarr/ or plate.ome.zarr/
     if (base_path / "plate.zarr").exists() or (base_path / "plate.ome.zarr").exists():
@@ -903,6 +923,25 @@ def detect_zarr_version(path: Path) -> Optional[int]:
         if (arr_path / ".zarray").exists():
             return 2
     return None
+
+
+class _TensorStoreArrayWrapper:
+    """Thin wrapper around a tensorstore array exposing numpy-compatible dtype.
+
+    Dask's ``from_array`` calls ``np.dtype(arr.dtype)`` internally, which fails
+    with tensorstore's own dtype objects.  This wrapper delegates all indexing
+    to the underlying tensorstore array while reporting a plain numpy dtype so
+    that dask can build its task graph without errors.
+    """
+
+    def __init__(self, ts_array):
+        self._arr = ts_array
+        self.shape = tuple(ts_array.shape)
+        self.dtype = np.dtype(ts_array.dtype.numpy_dtype)
+        self.ndim = len(ts_array.shape)
+
+    def __getitem__(self, idx):
+        return np.asarray(self._arr[idx].read().result())
 
 
 def open_zarr_tensorstore(path: Path, array_path: str = "0") -> Optional[Any]:
@@ -1240,6 +1279,78 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
     return [], "unknown"
 
 
+def _discover_zarr_images(base_path: Path) -> Tuple[List[Dict], str, bool]:
+    """FOVs with an ``"image"`` (OmeZarrImage) each, from OME-Zarr metadata.
+
+    Returns (fovs, structure, legacy); legacy is True when the pre-0.5
+    directory walk found them. That walk runs only when the layout is not
+    recognised; a recognised layout without acquired fields raises OmeZarrError.
+    """
+    fovs, structure = discover_ome_zarr(base_path)
+    if structure != "unknown":
+        if not fovs:
+            raise OmeZarrError(f"{base_path}: no acquired fields")
+        return fovs, structure, False
+    fovs, structure = discover_zarr_v3_fovs(base_path)
+    for fov in fovs:
+        fov["image"] = image_from_legacy(
+            fov["path"], parse_zarr_v3_metadata(fov["path"])
+        )
+    return fovs, structure, True
+
+
+def _image_shape(image: OmeZarrImage) -> tuple:
+    """Shape of an image's full-resolution array."""
+    ts_arr = open_zarr_tensorstore(image.group, image.array_path)
+    if ts_arr is None:
+        raise RuntimeError(f"cannot open {image.array_dir}")
+    return tuple(ts_arr.shape)
+
+
+def _arrange_image_axes(darr, image: OmeZarrImage, target: List[str]):
+    """_arrange_axes for an image; errors name the image's array."""
+    try:
+        return _arrange_axes(darr, image.dim_names, target)
+    except ValueError as e:
+        raise OmeZarrError(f"{image.array_dir}: {e}") from e
+
+
+def _fov_entries(fovs: List[Dict], structure: str) -> List[Dict]:
+    """One {"region", "fov"} per FOV of the loaded array, in array order.
+
+    In a "6d" layout each region image holds several FOVs along its fov axis;
+    they are numbered 0..n-1 within the region, as the push API's 6D mode does.
+    """
+    entries = []
+    for f in fovs:
+        image = f["image"]
+        if structure != "6d" or "fov" not in image.dim_names:
+            entries.append({"region": f["region"], "fov": f["fov"]})
+            continue
+        n_fov = _image_shape(image)[image.dim_names.index("fov")]
+        entries.extend({"region": f["region"], "fov": i} for i in range(n_fov))
+    return entries
+
+
+def _arrange_axes(darr, dim_names: List[str], target: List[str]):
+    """Insert singleton axes for target names missing from dim_names, then
+    transpose to target order. Raises ValueError on a name not in target."""
+    unknown = [name for name in dim_names if name not in target]
+    if unknown or len(set(dim_names)) != len(dim_names):
+        raise ValueError(f"Cannot arrange axes {dim_names} as {target}")
+    if len(dim_names) != darr.ndim:
+        raise ValueError(f"Axes {dim_names} do not match array shape {darr.shape}")
+    names = list(dim_names)
+    for name in target:
+        if name not in names:
+            darr = darr[..., np.newaxis]
+            names.append(name)
+    order = [names.index(name) for name in target]
+    if order != list(range(len(order))):
+        darr = darr.transpose(order)
+    return darr
+
+
 def data_structure_changed(
     old_data: Optional["xr.DataArray"], new_data: "xr.DataArray"
 ) -> bool:
@@ -1435,9 +1546,20 @@ class LightweightViewer(QWidget):
 
         # External navigation state (push-based API for live acquisition)
         # _file_index is accessed from both main thread and dask workers, needs lock
-        self._file_index: Dict[tuple, str] = {}  # (t, fov_idx, z, channel) -> filepath
+        # (t, fov_idx, z, channel) -> (filepath, page_idx)
+        self._file_index: Dict[Tuple[int, int, int, str], Tuple[str, int]] = {}
         self._file_index_lock = threading.Lock()
+        # LRU cache of open TiffFile handles to avoid re-parsing IFD chains.
+        # Each entry is (TiffFile, per-file Lock) so reads to different files
+        # proceed in parallel while same-file reads are serialized.
+        # Bounded to avoid fd exhaustion with thousands of files.
+        self._tiff_handles: OrderedDict = OrderedDict()  # filepath -> (tif, lock)
+        self._tiff_handles_lock = threading.Lock()  # protects the dict itself
+        self._tiff_handles_max = 128
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
+        self._acquisition_incomplete: bool = False  # zarr pull mode only
+        # True once a push API start ran; pull-mode load_dataset clears it
+        self._push_mode_started: bool = False
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
         self._luts: Dict[int, Any] = {}  # channel_idx -> colormap
@@ -1564,6 +1686,9 @@ class LightweightViewer(QWidget):
         fov_layout.addWidget(self._fov_play_btn)
         fov_layout.addWidget(self._fov_label)
         fov_layout.addWidget(self._fov_slider)
+        self._fov_slider_container.setVisible(
+            False
+        )  # Hidden until push API sets FOV labels
         slider_layout.addWidget(self._fov_slider_container)
 
         layout.addWidget(slider_container)
@@ -1722,6 +1847,7 @@ class LightweightViewer(QWidget):
         # Clear previous state
         with self._file_index_lock:
             self._file_index.clear()
+        self._close_tiff_handle_cache()
         self._plane_cache.clear()
         self._max_fov_per_time.clear()
 
@@ -1731,6 +1857,7 @@ class LightweightViewer(QWidget):
         self._image_height = height
         self._image_width = width
         self._fov_labels = list(fov_labels)
+        self._push_mode_started = True
 
         # Set up LUTs based on channel wavelengths
         self._luts = {
@@ -1800,7 +1927,15 @@ class LightweightViewer(QWidget):
         self._xarray_data = xarr
         self._set_ndv_data(xarr)
 
-    def register_image(self, t: int, fov_idx: int, z: int, channel: str, filepath: str):
+    def register_image(
+        self,
+        t: int,
+        fov_idx: int,
+        z: int,
+        channel: str,
+        filepath: str,
+        page_idx: int = 0,
+    ):
         """Register a newly saved image file.
 
         Thread-safe: can be called from worker thread.
@@ -1812,10 +1947,15 @@ class LightweightViewer(QWidget):
             z: Z-level index
             channel: Channel name
             filepath: Path to the saved TIFF file
+            page_idx: Page index within the TIFF file (default 0).
+                For OME-TIFF stacks that store multiple planes per file,
+                specify which page to read.
         """
+        if page_idx < 0:
+            raise ValueError(f"page_idx must be >= 0, got {page_idx}")
         # Update file index (protected by lock for dask worker thread safety)
         with self._file_index_lock:
-            self._file_index[(t, fov_idx, z, channel)] = filepath
+            self._file_index[(t, fov_idx, z, channel)] = (filepath, page_idx)
 
         # Emit signal with raw indices - main thread computes max values
         # to avoid race condition on _max_time_idx
@@ -1941,6 +2081,9 @@ class LightweightViewer(QWidget):
         Returns:
             True if navigation succeeded, False if FOV not found.
         """
+        if not self.is_push_mode_active():
+            logger.debug("go_to_well_fov: push mode not active")
+            return False
         if not self._fov_labels:
             logger.debug("go_to_well_fov: no FOV labels available")
             return False
@@ -1962,8 +2105,8 @@ class LightweightViewer(QWidget):
         return True
 
     def is_push_mode_active(self) -> bool:
-        """Check if push-based mode is active (has FOV labels configured or zarr mode)."""
-        return bool(self._fov_labels) or self._zarr_acquisition_active
+        """True once a push API start ran (until a pull-mode load) or zarr push is active."""
+        return self._push_mode_started or self._zarr_acquisition_active
 
     def _load_single_plane(
         self, t: int, fov_idx: int, z: int, channel: str
@@ -1988,29 +2131,71 @@ class LightweightViewer(QWidget):
 
         # Load from file (lock protects concurrent access from dask workers)
         with self._file_index_lock:
-            filepath = self._file_index.get(cache_key)
+            entry = self._file_index.get(cache_key)
 
-        if not filepath:
+        if entry is None:
             # File not yet registered - expected during acquisition, not an error
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+        filepath, page_idx = entry
 
         if not LAZY_LOADING_AVAILABLE:
             logger.error("tifffile not available for loading image planes")
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            with tf.TiffFile(filepath) as tif:
-                plane = tif.pages[0].asarray()
-                self._plane_cache.put(cache_key, plane)
-                return plane
+            # Look up or create a cached (TiffFile, Lock) entry.
+            # Global lock is held only for dict bookkeeping; the per-file
+            # lock serializes reads to the same file while allowing parallel
+            # reads across different files.
+            evicted_entries = []
+            with self._tiff_handles_lock:
+                entry = self._tiff_handles.get(filepath)
+                if entry is not None:
+                    tif, file_lock = entry
+                    self._tiff_handles.move_to_end(filepath)
+                else:
+                    tif = tf.TiffFile(filepath)
+                    file_lock = threading.Lock()
+                    self._tiff_handles[filepath] = (tif, file_lock)
+                    # Evict LRU handles if over limit
+                    while len(self._tiff_handles) > self._tiff_handles_max:
+                        _, evicted = self._tiff_handles.popitem(last=False)
+                        evicted_entries.append(evicted)
+            # Close evicted handles.  Safe because LRU eviction only removes
+            # the oldest entry, which the current thread just moved away from
+            # (move_to_end).  For another thread to hold a reference to the
+            # evicted entry, 128+ new files would need to open in the
+            # microseconds between its lookup and file_lock acquire.
+            for old_tif, old_lock in evicted_entries:
+                with old_lock:
+                    self._close_tiff_handles([old_tif])
+            # Read page under per-file lock
+            with file_lock:
+                plane = tif.pages[page_idx].asarray()
+            self._plane_cache.put(cache_key, plane)
+            return plane
         except FileNotFoundError:
             logger.warning("Image file not found (may have been deleted): %s", filepath)
+        except IndexError:
+            # Evict stale entry so next lookup re-opens the file and sees
+            # newly appended pages.  Don't close the handle here — another
+            # thread may still hold a reference and be about to read.  The
+            # handle will be closed at end_acquisition() / closeEvent().
+            with self._tiff_handles_lock:
+                self._tiff_handles.pop(filepath, None)
+            logger.warning(
+                "Page %d not available in %s (file may still be writing)",
+                page_idx,
+                filepath,
+            )
         except PermissionError as e:
             logger.error("Permission denied reading image %s: %s", filepath, e)
         except Exception as e:
             logger.error(
-                "Failed to load image plane %s (t=%d, fov=%d, z=%d, ch=%s): %s",
+                "Failed to load image plane %s page %d (t=%d, fov=%d, z=%d, ch=%s): %s",
                 filepath,
+                page_idx,
                 t,
                 fov_idx,
                 z,
@@ -2112,6 +2297,7 @@ class LightweightViewer(QWidget):
         self._acquisition_active = False
         # NOTE: _fov_labels is NOT cleared here - navigation must still work
         # after acquisition ends. Labels are cleared in start_acquisition().
+        self._close_tiff_handle_cache()
         logger.info("NDViewer: Acquisition ended")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2207,6 +2393,7 @@ class LightweightViewer(QWidget):
         self._current_time_idx = 0
         self._max_time_idx = 0
         self._zarr_acquisition_active = True
+        self._push_mode_started = True
 
         # Update sliders
         self._updating_sliders = True
@@ -2341,6 +2528,7 @@ class LightweightViewer(QWidget):
         self._current_time_idx = 0
         self._max_time_idx = 0
         self._zarr_acquisition_active = True
+        self._push_mode_started = True
 
         # Update sliders - start at 0, grows as FOVs are acquired
         self._updating_sliders = True
@@ -2748,6 +2936,16 @@ class LightweightViewer(QWidget):
         self._close_tiff_handles(getattr(self, "_open_handles", []))
         self._open_handles = []
 
+    def _close_tiff_handle_cache(self):
+        """Close cached TiffFile handles used by push-based OME-TIFF loading."""
+        with self._tiff_handles_lock:
+            entries = list(self._tiff_handles.values())
+            self._tiff_handles.clear()
+        # Acquire each per-file lock before closing to wait for in-flight readers.
+        for tif, file_lock in entries:
+            with file_lock:
+                self._close_tiff_handles([tif])
+
     def closeEvent(self, event):
         """Clean up resources when the widget is closed."""
         if self._refresh_timer:
@@ -2774,6 +2972,7 @@ class LightweightViewer(QWidget):
         with self._zarr_written_planes_lock:
             self._zarr_written_planes.clear()
         self._close_open_handles()
+        self._close_tiff_handle_cache()
         super().closeEvent(event)
 
     def _force_refresh(self):
@@ -2787,25 +2986,22 @@ class LightweightViewer(QWidget):
 
         if fmt == "zarr_v3":
             # For zarr v3, check zarr.json mtime and acquisition_complete flag
-            fovs, structure_type = discover_zarr_v3_fovs(base)
+            try:
+                fovs, _, _ = _discover_zarr_images(base)
+            except Exception as e:
+                logger.debug("Error discovering zarr FOVs: %s", e)
+                return (fmt, -1, False, 0)
             if not fovs:
                 return (fmt, 0, False, 0)
 
-            # Get first zarr path to check metadata
             first_path = fovs[0]["path"]
-            zarr_json_path = first_path / "zarr.json"
-
+            acquisition_complete = fovs[0]["image"].acquisition_complete
             mtime_ns = 0
-            acquisition_complete = False
-
-            if zarr_json_path.exists():
-                try:
-                    st = zarr_json_path.stat()
-                    mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
-                    meta = parse_zarr_v3_metadata(first_path)
-                    acquisition_complete = meta.get("acquisition_complete", False)
-                except Exception as e:
-                    logger.debug("Error reading zarr metadata: %s", e)
+            try:
+                st = (first_path / "zarr.json").stat()
+                mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+            except OSError as e:
+                logger.debug("Error reading zarr metadata: %s", e)
 
             return (fmt, len(fovs), acquisition_complete, mtime_ns)
 
@@ -2937,6 +3133,14 @@ class LightweightViewer(QWidget):
             return False
 
     def _maybe_refresh(self):
+        """Refresh slot: loader errors are logged and shown, never raised into Qt."""
+        try:
+            self._refresh_if_changed()
+        except Exception as e:
+            logger.exception("Refresh of %s failed", self.dataset_path)
+            self.status_label.setText(f"Error: {e}")
+
+    def _refresh_if_changed(self):
         if not LAZY_LOADING_AVAILABLE:
             return
 
@@ -2959,6 +3163,7 @@ class LightweightViewer(QWidget):
         old_data = self._xarray_data
         old_handles = getattr(self, "_open_handles", [])
         self._xarray_data = data
+        self._accept_load_state(data)
         self._open_handles = data.attrs.get("_open_tifs", [])
 
         # Check if data structure changed (dims, channels, channel names, or LUTs) - if so, force full rebuild
@@ -3020,6 +3225,7 @@ class LightweightViewer(QWidget):
         # between datasets with different channel configurations.
         self._last_sig = None
         self._xarray_data = None
+        self._push_mode_started = False
 
         self.dataset_path = path
         self.status_label.setText(f"Loading: {Path(path).name}...")
@@ -3029,13 +3235,12 @@ class LightweightViewer(QWidget):
             data = self._create_lazy_array(Path(path))
             if data is not None:
                 self._xarray_data = data  # Store for profiling
+                self._accept_load_state(data)
                 self._open_handles = data.attrs.get("_open_tifs", [])
                 # Always do full rebuild when explicitly loading a new dataset.
                 # This ensures channels/LUTs are properly reset.
                 self._set_ndv_data(data)
-
-                # Update status (keep it stable during live acquisition; avoid printing dims like time=...)
-                self.status_label.setText(f"Loaded: {Path(path).name}")
+                self._show_loaded_status()
             else:
                 self.status_label.setText("Failed to load dataset")
         except Exception as e:
@@ -3106,6 +3311,9 @@ class LightweightViewer(QWidget):
         try:
             base_path = Path(self.dataset_path)
             fmt = detect_format(base_path)
+            if fmt == "zarr_v3":
+                fovs, structure, _ = _discover_zarr_images(base_path)
+                return _fov_entries(fovs, structure)
             return self._discover_fovs(base_path, fmt)
         except Exception as e:
             logger.debug(f"get_fov_list error: {e}")
@@ -3127,23 +3335,54 @@ class LightweightViewer(QWidget):
 
         Useful after loading a new dataset or when you want to update
         the display without waiting for the automatic refresh timer.
+        Loader errors are logged and shown in the status label, never raised.
         """
         self._force_refresh()
 
-    def _create_lazy_array(self, base_path: Path) -> Optional[xr.DataArray]:
+    def _accept_load_state(self, data: "xr.DataArray") -> None:
+        """Apply the FOV labels and incomplete flag of newly shown pull-mode data."""
+        if not self._push_mode_started:
+            self._fov_labels = list(data.attrs.get("_fov_labels", []))
+        self._acquisition_incomplete = bool(
+            data.attrs.get("_acquisition_incomplete", False)
+        )
+        self._show_loaded_status()
+
+    def _show_loaded_status(self) -> None:
+        """Status text for the data on show: the dataset name, plus the incomplete label when it applies.
+
+        Called whenever pull-mode data is accepted (load and refresh), so the label follows the flag.
+        """
+        name = Path(self.dataset_path).name
+        if self._acquisition_incomplete:
+            logger.info("%s: acquisition incomplete or aborted", self.dataset_path)
+            self.status_label.setText(f"Loaded: {name} (incomplete acquisition)")
+        else:
+            self.status_label.setText(f"Loaded: {name}")
+
+    def _create_lazy_array(self, base_path: Path) -> "Optional[xr.DataArray]":
         """Create lazy xarray from dataset - auto-detects format."""
         if not LAZY_LOADING_AVAILABLE:
             return None
 
         fmt = detect_format(base_path)
 
-        # Zarr v3 has its own FOV discovery
+        # Zarr v3 has its own FOV discovery. FOV labels and the incomplete flag
+        # travel on the array; _accept_load_state applies them once it is shown.
         if fmt == "zarr_v3":
-            fovs, structure_type = discover_zarr_v3_fovs(base_path)
+            fovs, structure_type, legacy = _discover_zarr_images(base_path)
             if not fovs:
                 print("No zarr v3 FOVs found")
                 return None
-            return self._load_zarr_v3(base_path, fovs, structure_type)
+            data = self._load_zarr_v3(base_path, fovs, structure_type)
+            data.attrs["_fov_labels"] = [
+                f"{e['region']}:{e['fov']}" for e in _fov_entries(fovs, structure_type)
+            ]
+            # Pre-0.5 completion flags are unreliable; label only spec stores
+            data.attrs["_acquisition_incomplete"] = not legacy and any(
+                not f["image"].acquisition_complete or f["image"].aborted for f in fovs
+            )
+            return data
 
         fovs = self._discover_fovs(base_path, fmt)
 
@@ -3186,7 +3425,7 @@ class LightweightViewer(QWidget):
 
     def _load_ome_tiff(
         self, base_path: Path, fovs: List[Dict]
-    ) -> Optional[xr.DataArray]:
+    ) -> "Optional[xr.DataArray]":
         """Fast OME-TIFF: mmap via tifffile.aszarr, small chunks, no big graphs."""
         try:
             ome_dir = base_path / "ome_tiff"
@@ -3334,7 +3573,7 @@ class LightweightViewer(QWidget):
 
     def _load_single_tiff(
         self, base_path: Path, fovs: List[Dict]
-    ) -> Optional[xr.DataArray]:
+    ) -> "Optional[xr.DataArray]":
         """Fast single-TIFF: per-plane on-demand loads with tiny LRU cache."""
         try:
             file_index = {}  # (t, region, fov, z, channel) -> filepath
@@ -3477,252 +3716,63 @@ class LightweightViewer(QWidget):
 
     def _load_zarr_v3(
         self, base_path: Path, fovs: List[Dict], structure_type: str
-    ) -> Optional[xr.DataArray]:
-        """Load zarr v3 dataset (OME-NGFF format from Squid).
-
-        Uses tensorstore to support both zarr v2 and v3 formats.
+    ) -> "xr.DataArray":
+        """Load a zarr v3 dataset described by OME-Zarr metadata.
 
         Args:
             base_path: Dataset root directory
-            fovs: List of FOV dicts from discover_zarr_v3_fovs
+            fovs: FOV dicts from _discover_zarr_images (each with an "image")
             structure_type: "hcs_plate", "per_fov", or "6d"
 
         Returns:
-            xarray.DataArray with dims (time, fov, z, channel, y, x)
+            xarray.DataArray with dims (time, fov, z, channel, y, x).
+            Any failure raises; load_dataset reports it.
         """
-        try:
-            if structure_type == "6d":
-                return self._load_zarr_v3_6d(fovs[0]["path"])
-            else:
-                return self._load_zarr_v3_5d(fovs)
-        except Exception as e:
-            print(f"Zarr v3 load error: {e}")
-            import traceback
+        if structure_type == "6d":
+            return self._load_zarr_v3_6d(fovs)
+        return self._load_zarr_v3_5d(fovs)
 
-            traceback.print_exc()
-            return None
-
-    def _load_zarr_v3_5d(self, fovs: List[Dict]) -> Optional[xr.DataArray]:
-        """Load per-FOV zarr v3 stores and stack them.
-
-        Each FOV is a separate zarr store with dimensions (T, C, Z, Y, X).
-        Stacks them along a new FOV axis.
-
-        Uses tensorstore to support both zarr v2 and v3 formats.
-        """
+    @staticmethod
+    def _open_zarr_image(image: OmeZarrImage):
+        """Dask array of an image's full-resolution array (per-plane chunks)."""
         import dask.array as da
-        import xarray as xr
 
-        if not fovs:
-            return None
-
-        # Parse metadata from first FOV
-        first_path = fovs[0]["path"]
-        meta = parse_zarr_v3_metadata(first_path)
-
-        # Open first zarr to get shape/dtype using tensorstore
-        ts_arr = open_zarr_tensorstore(first_path, array_path="0")
+        ts_arr = open_zarr_tensorstore(image.group, image.array_path)
         if ts_arr is None:
-            logger.error("Failed to open zarr store %s", first_path)
-            return None
-
+            raise RuntimeError(f"cannot open {image.array_dir}")
         shape = ts_arr.shape
-        dtype = ts_arr.dtype.numpy_dtype
-
-        # Determine axis order from metadata or infer from shape
-        # Typical OME-NGFF order: (T, C, Z, Y, X)
-        axes = meta.get("axes", [])
-        if axes:
-            axis_names = [ax.get("name", "").lower() for ax in axes]
-        else:
-            # Infer from shape length
-            if len(shape) == 5:
-                axis_names = ["t", "c", "z", "y", "x"]
-            elif len(shape) == 4:
-                axis_names = ["c", "z", "y", "x"]
-            elif len(shape) == 3:
-                axis_names = ["z", "y", "x"]
-            else:
-                axis_names = ["y", "x"]
-
-        # Extract dimensions
-        n_t = shape[axis_names.index("t")] if "t" in axis_names else 1
-        n_c = shape[axis_names.index("c")] if "c" in axis_names else 1
-        n_z = shape[axis_names.index("z")] if "z" in axis_names else 1
-        n_y = shape[axis_names.index("y")] if "y" in axis_names else shape[-2]
-        n_x = shape[axis_names.index("x")] if "x" in axis_names else shape[-1]
-
-        # Build channel info
-        channel_names = meta.get("channel_names", [])
-        if not channel_names or len(channel_names) != n_c:
-            channel_names = [f"Ch{i}" for i in range(n_c)]
-
-        channel_colors = meta.get("channel_colors", [])
-        luts = {}
-        for i, name in enumerate(channel_names):
-            if i < len(channel_colors) and channel_colors[i]:
-                luts[i] = hex_to_colormap(channel_colors[i])
-            else:
-                luts[i] = wavelength_to_colormap(extract_wavelength(name))
-
-        # Create dask arrays for each FOV using tensorstore
-        fov_arrays = []
-        for fov_info in fovs:
-            fov_path = fov_info["path"]
-            try:
-                ts_arr = open_zarr_tensorstore(fov_path, array_path="0")
-                if ts_arr is None:
-                    raise RuntimeError(f"Could not open zarr store at {fov_path}")
-
-                # Create dask array with per-plane chunks
-                chunks = tuple(
-                    1 if i < len(shape) - 2 else s for i, s in enumerate(shape)
-                )
-                darr = da.from_array(ts_arr, chunks=chunks)
-
-                # Ensure shape is (T, C, Z, Y, X)
-                if len(darr.shape) == 4:
-                    darr = darr[np.newaxis, ...]  # Add T axis
-                elif len(darr.shape) == 3:
-                    darr = darr[np.newaxis, np.newaxis, ...]  # Add T and C axes
-
-                fov_arrays.append(darr)
-            except Exception as e:
-                logger.warning("Failed to load FOV %s: %s", fov_path, e)
-                # Create zeros placeholder
-                fov_arrays.append(
-                    da.zeros(
-                        (n_t, n_c, n_z, n_y, n_x),
-                        dtype=dtype,
-                        chunks=(1, 1, 1, n_y, n_x),
-                    )
-                )
-
-        # Stack FOVs: (n_fov, T, C, Z, Y, X)
-        stacked = da.stack(fov_arrays, axis=0)
-
-        # Transpose to (T, FOV, Z, C, Y, X) then reorder to standard dims
-        # Current: (FOV, T, C, Z, Y, X)
-        # Want: (T, FOV, Z, C, Y, X)
-        stacked = da.moveaxis(stacked, 0, 1)  # Now (T, FOV, C, Z, Y, X)
-        stacked = da.moveaxis(stacked, 3, 2)  # Now (T, FOV, Z, C, Y, X)
-
-        n_fov = len(fovs)
-        xarr = xr.DataArray(
-            stacked,
-            dims=["time", "fov", "z", "channel", "y", "x"],
-            coords={
-                "time": list(range(n_t)),
-                "fov": list(range(n_fov)),
-                "z": list(range(n_z)),
-                "channel": list(range(n_c)),
-            },
-        )
-        xarr.attrs["luts"] = luts
-        xarr.attrs["channel_names"] = channel_names
-
-        # Store physical sizes
-        if meta.get("pixel_size_um") is not None:
-            xarr.attrs["pixel_size_um"] = meta["pixel_size_um"]
-            xarr.attrs["pixel_size_x_um"] = meta["pixel_size_um"]
-            xarr.attrs["pixel_size_y_um"] = meta["pixel_size_um"]
-        if meta.get("dz_um") is not None:
-            xarr.attrs["dz_um"] = meta["dz_um"]
-            xarr.attrs["pixel_size_z_um"] = meta["dz_um"]
-
-        return xarr
-
-    def _load_zarr_v3_6d(self, zarr_path: Path) -> Optional[xr.DataArray]:
-        """Load a single 6D zarr v3 store with FOV dimension.
-
-        Handles zarr stores with dimensions like (T, FOV, C, Z, Y, X).
-        Uses tensorstore to support both zarr v2 and v3 formats.
-        """
-        import dask.array as da
-        import xarray as xr
-
-        meta = parse_zarr_v3_metadata(zarr_path)
-
-        # Open zarr store using tensorstore
-        ts_arr = open_zarr_tensorstore(zarr_path, array_path="0")
-        if ts_arr is None:
-            logger.error("Failed to open zarr store %s", zarr_path)
-            return None
-        shape = ts_arr.shape
-
-        # Determine axis order
-        axes = meta.get("axes", [])
-        if axes:
-            axis_names = [ax.get("name", "").lower() for ax in axes]
-        else:
-            # Fallback: infer axis order from shape length when metadata is missing.
-            # Assumes OME-NGFF conventions (T, C, Z, Y, X) or (T, FOV, C, Z, Y, X).
-            if len(shape) == 6:
-                axis_names = ["t", "fov", "c", "z", "y", "x"]
-            elif len(shape) == 5:
-                axis_names = ["t", "c", "z", "y", "x"]
-            else:
-                axis_names = (
-                    ["c", "z", "y", "x"] if len(shape) == 4 else ["z", "y", "x"]
-                )
-
-        # Normalize axis names
-        axis_map = {"position": "fov", "p": "fov", "time": "t"}
-        axis_names = [axis_map.get(n, n) for n in axis_names]
-
-        # Extract dimensions
-        def get_dim(name, default=1):
-            if name in axis_names:
-                return shape[axis_names.index(name)]
-            return default
-
-        n_t = get_dim("t")
-        n_fov = get_dim("fov")
-        n_c = get_dim("c")
-        n_z = get_dim("z")
-        # n_y and n_x not needed - shape comes from dask array directly
-
-        # Build channel info
-        channel_names = meta.get("channel_names", [])
-        if not channel_names or len(channel_names) != n_c:
-            channel_names = [f"Ch{i}" for i in range(n_c)]
-
-        channel_colors = meta.get("channel_colors", [])
-        luts = {}
-        for i, name in enumerate(channel_names):
-            if i < len(channel_colors) and channel_colors[i]:
-                luts[i] = hex_to_colormap(channel_colors[i])
-            else:
-                luts[i] = wavelength_to_colormap(extract_wavelength(name))
-
-        # Create dask array with per-plane chunks using tensorstore array
+        # Wrap tensorstore array so dask sees a numpy-compatible dtype.
         chunks = tuple(1 if i < len(shape) - 2 else s for i, s in enumerate(shape))
-        darr = da.from_array(ts_arr, chunks=chunks)
+        return da.from_array(_TensorStoreArrayWrapper(ts_arr), chunks=chunks)
 
-        # Transpose to standard order: (time, fov, z, channel, y, x)
-        # Build transpose order based on current axis order
-        target_order = ["t", "fov", "z", "c", "y", "x"]
-        current_order = list(axis_names)  # Copy to avoid mutating original
+    @staticmethod
+    def _warn_dimension_names(image: OmeZarrImage) -> None:
+        names = array_dimension_names(image)
+        if names is not None and [str(n).lower() for n in names] != image.dim_names:
+            logger.warning(
+                "%s: array dimension_names %s differ from the axes %s; using the axes",
+                image.array_dir,
+                names,
+                image.dim_names,
+            )
 
-        # Ensure all target axes exist
-        for ax in target_order:
-            if ax not in current_order:
-                # Add missing dimension
-                darr = darr[..., np.newaxis]
-                current_order.append(ax)
+    @staticmethod
+    def _zarr_xarray(darr, image: OmeZarrImage) -> "xr.DataArray":
+        """Wrap a (time, fov, z, channel, y, x) dask array with labels and scale."""
+        import xarray as xr
 
-        # Build transpose indices
-        transpose_idx = []
-        for ax in target_order:
-            if ax in current_order:
-                transpose_idx.append(current_order.index(ax))
+        n_t, n_fov, n_z, n_c = darr.shape[:4]
+        channel_names = list(image.channel_names)
+        if len(channel_names) != n_c:
+            channel_names = [f"Ch{i}" for i in range(n_c)]
 
-        if transpose_idx != list(range(len(transpose_idx))):
-            darr = da.transpose(darr, transpose_idx)
-
-        # Reshape if needed to ensure 6D
-        while len(darr.shape) < 6:
-            darr = darr[np.newaxis, ...]
+        channel_colors = image.channel_colors
+        luts = {}
+        for i, name in enumerate(channel_names):
+            if i < len(channel_colors) and channel_colors[i]:
+                luts[i] = hex_to_colormap(channel_colors[i])
+            else:
+                luts[i] = wavelength_to_colormap(extract_wavelength(name))
 
         xarr = xr.DataArray(
             darr,
@@ -3738,17 +3788,66 @@ class LightweightViewer(QWidget):
         xarr.attrs["channel_names"] = channel_names
 
         # Store physical sizes
-        if meta.get("pixel_size_um") is not None:
-            xarr.attrs["pixel_size_um"] = meta["pixel_size_um"]
-            xarr.attrs["pixel_size_x_um"] = meta["pixel_size_um"]
-            xarr.attrs["pixel_size_y_um"] = meta["pixel_size_um"]
-        if meta.get("dz_um") is not None:
-            xarr.attrs["dz_um"] = meta["dz_um"]
-            xarr.attrs["pixel_size_z_um"] = meta["dz_um"]
-
+        if image.pixel_size_um is not None:
+            xarr.attrs["pixel_size_um"] = image.pixel_size_um
+            xarr.attrs["pixel_size_x_um"] = image.pixel_size_um
+            xarr.attrs["pixel_size_y_um"] = image.scale_um.get("y", image.pixel_size_um)
+        if image.dz_um is not None:
+            xarr.attrs["dz_um"] = image.dz_um
+            xarr.attrs["pixel_size_z_um"] = image.dz_um
         return xarr
 
-    def _set_ndv_data(self, data: xr.DataArray):
+    def _load_zarr_v3_5d(self, fovs: List[Dict]) -> "xr.DataArray":
+        """Load per-FOV zarr v3 images and stack them along a FOV axis.
+
+        Every FOV must open; a FOV that does not raises (no placeholder).
+        """
+        import dask.array as da
+
+        first = fovs[0]["image"]
+        self._warn_dimension_names(first)
+
+        fov_arrays = []
+        for fov_info in fovs:
+            image = fov_info["image"]
+            darr = self._open_zarr_image(image)
+            fov_arrays.append(
+                _arrange_image_axes(darr, image, ["t", "c", "z", "y", "x"])
+            )
+
+        # Stack FOVs: (FOV, T, C, Z, Y, X) -> (T, FOV, Z, C, Y, X)
+        stacked = da.stack(fov_arrays, axis=0)
+        stacked = da.moveaxis(stacked, 0, 1)  # Now (T, FOV, C, Z, Y, X)
+        stacked = da.moveaxis(stacked, 3, 2)  # Now (T, FOV, Z, C, Y, X)
+        return self._zarr_xarray(stacked, first)
+
+    def _load_zarr_v3_6d(self, fovs: List[Dict]) -> "xr.DataArray":
+        """Load region images whose axes include a FOV axis.
+
+        Regions are concatenated along the fov axis in discovery order; their
+        shapes must agree on every other axis.
+        """
+        import dask.array as da
+
+        target = ["t", "fov", "z", "c", "y", "x"]
+        first = fovs[0]
+        self._warn_dimension_names(first["image"])
+        arrays = []
+        for fov_info in fovs:
+            image = fov_info["image"]
+            darr = _arrange_image_axes(self._open_zarr_image(image), image, target)
+            if arrays:
+                ref, other = arrays[0].shape, darr.shape
+                if ref[:1] + ref[2:] != other[:1] + other[2:]:
+                    raise OmeZarrError(
+                        f"regions {first['region']} and {fov_info['region']} have "
+                        f"different shapes {ref} and {other} (t, fov, z, c, y, x)"
+                    )
+            arrays.append(darr)
+        darr = arrays[0] if len(arrays) == 1 else da.concatenate(arrays, axis=1)
+        return self._zarr_xarray(darr, first["image"])
+
+    def _set_ndv_data(self, data: "xr.DataArray"):
         """Update NDV viewer with lazy array."""
         global _current_voxel_scale
 

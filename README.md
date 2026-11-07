@@ -1,30 +1,54 @@
-# lightweight_ndviewer
+# ndviewer_light
 
-minimal ndv-based viewer for viewing 5-D acquisitions
+Minimal NDV-based viewer for viewing 5-D acquisitions.
 
 ## Installation
 
-### As a library (for use in other projects)
+### Standalone (pip)
+
+Requires Python 3.10+.
 
 ```bash
-pip install -e /path/to/ndviewer_light
+git clone https://github.com/Cephla-Lab/ndviewer_light.git
+cd ndviewer_light
+pip3 install .
 ```
 
-Or with git submodule:
+> On Ubuntu 24.04+, add `--break-system-packages` or use a virtual environment.
+
+This installs an `ndviewer-light` command you can run from anywhere.
+
+#### Create a desktop shortcut (optional)
 
 ```bash
-git submodule add <repo-url> ndviewer_light
-pip install -e ./ndviewer_light
+python3 create_shortcut.py
 ```
 
-### Standalone (conda environment)
+- **macOS:** Creates an app in `~/Applications/NDViewer Light.app`. Drag it to your Dock if you like.
+- **Windows:** Creates a shortcut on your Desktop.
+- **Linux:** Creates a `.desktop` entry in `~/.local/share/applications/`.
+
+### Conda environment
 
 ```bash
 conda env create -f environment.yml
 conda activate ndviewer_light
 ```
 
+### As a library
+
+```bash
+pip3 install /path/to/ndviewer_light
+```
+
 ## Usage
+
+### Command line
+
+```bash
+ndviewer-light                      # open with file dialog
+ndviewer-light /path/to/dataset     # open a specific dataset
+```
 
 ### As a library
 
@@ -39,14 +63,11 @@ window = LightweightMainWindow("/path/to/dataset")
 window.show()
 ```
 
-### Standalone
+## Supported formats
 
-```bash
-python ndviewer_light.py
-```
+- **OME-Zarr 0.5 (Zarr v3)**: a plate, well or image group, opened directly or inside a Squid experiment folder. Datasets, axes and pixel sizes are read from the store's metadata.
+- **Squid's 6D layout** (time, FOV, z, channel, y, x).
+- **OME-TIFF**.
+- **Single TIFF**.
 
-Or open a specific dataset:
-
-```bash
-python ndviewer_light.py /path/to/dataset
-```
+An array whose planned planes were not all written is labelled "(incomplete acquisition)".

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=45"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -12,6 +12,7 @@ dependencies = [
     "numpy",
     "scipy",
     "tifffile",
+    "zarr",
     "dask",
     "xarray",
     "superqt",
@@ -23,6 +24,9 @@ dependencies = [
     "tensorstore",
     "ndv>=0.4.0,<0.5.0",
 ]
+
+[project.scripts]
+ndviewer-light = "ndviewer_light.core:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
