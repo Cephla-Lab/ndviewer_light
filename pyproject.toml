@@ -40,6 +40,9 @@ include = ["ndviewer_light"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "window: needs a real window and GL context (texture-level smoke); skipped when the Qt platform is offscreen, see tests/conftest.py window_qapp",
+]
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest"]

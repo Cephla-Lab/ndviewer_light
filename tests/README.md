@@ -34,6 +34,39 @@ Run specific test:
 pytest tests/test_channel_names.py::TestOMETiffChannelNamesLogic::test_empty_channel_names_fallback_to_default -v
 ```
 
+## Window smokes and ndv private access
+
+Most tests run under `QT_QPA_PLATFORM=offscreen` (the viewer modules `setdefault` it at
+import) and `conftest.py` pins ndv's GL texture-size query so no GL context is needed.
+Three texture-level smokes in `test_window_smokes.py` need a real window instead: they
+carry `@pytest.mark.window` and skip when the live Qt platform is offscreen (the
+`window_qapp` fixture). Run them with the platform set explicitly and the real GL query
+enabled:
+
+```bash
+QT_QPA_PLATFORM=cocoa NDVL_REAL_GL=1 pytest tests/test_window_smokes.py   # macOS
+QT_QPA_PLATFORM=xcb NDVL_REAL_GL=1 xvfb-run pytest tests/                   # Linux / CI
+```
+
+- **S1** push mode: frame N+1 via `register_image` reaches its channel's texture while the
+  `ArrayViewer` instance survives (no rebuild).
+- **S2** shape change through `_try_inplace_ndv_update`: z slider range *and* texture update
+  (`dims_changed` alone would leave the old pixels; `data_changed` must follow).
+- **S3** `set_current_index("z_level", 2)` puts plane 2 on screen.
+
+They wait by polling `processEvents()` and ndv's idle state, never by sleeping.
+
+ndv 0.5 has no public way to read the uploaded texture, the slider ranges or the fetch
+state, so `tests/_ndv_private.py` holds that access (`displayed_texture`, `dims_slider`,
+`is_idle`) and `pytest.skip`s when an attribute path is gone: an ndv rename fails one
+module loudly instead of every window test obscurely. `core.py` never imports it.
+
+The one private *write* the viewer still makes, `DataWrapper._data` in
+`_try_inplace_ndv_update`, is pinned by `test_inplace_update.py::test_data_wrapper_private_data_slot`;
+that module's docstring records the 2026-11-07 probe showing why the public
+`ArrayViewer.data` setter is not a substitute on ndv 0.5 (it clears and rebuilds the
+canvas on every frame).
+
 ## Test Files
 
 ### test_channel_names.py

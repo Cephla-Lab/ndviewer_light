@@ -2,6 +2,8 @@
 
 import os
 
+import pytest
+
 
 def _pin_gl_texture_limits() -> None:
     """Answer ndv's GL texture-size query with fixed limits before any viewer exists.
@@ -27,3 +29,20 @@ def _pin_gl_texture_limits() -> None:
 
 
 _pin_gl_texture_limits()
+
+
+@pytest.fixture
+def window_qapp():
+    """QApplication for ``@pytest.mark.window`` tests; skips on the offscreen platform.
+
+    Decided from the live application, not the environment: most test modules
+    ``setdefault`` QT_QPA_PLATFORM=offscreen at import, so with the variable unset a
+    full-suite run is offscreen and the window smokes skip. Set
+    ``QT_QPA_PLATFORM=cocoa`` (``xcb`` under xvfb) and ``NDVL_REAL_GL=1`` to run them.
+    """
+    from qtpy.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    if app.platformName() == "offscreen":
+        pytest.skip("window test: the Qt platform is offscreen")
+    return app

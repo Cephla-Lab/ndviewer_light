@@ -7,6 +7,16 @@ swap goes through the public ``ArrayViewer.data_wrapper`` and the wrapper's
 documented ``dims_changed`` / ``data_changed`` signals; the wrapped array has no
 public setter, so ``wrapper._data`` stays the one private write.
 
+Why not the public ``ArrayViewer.data`` setter (ndv#209 is fixed by ndv#253): probed
+2026-11-07 on ndv 0.5.0 / vispy 0.17, cocoa, 200 push frames of (3, 2, 256, 256)
+uint16. Neither path leaks (live VispyImageHandle / vispy texture / DataWrapper
+deltas all 0), but the setter runs ``_fully_synchronize_view`` -> ``_clear_canvas``
+on every frame: 398 ``add_image`` calls and 3353 vispy GL objects created, an empty
+canvas between frames, the camera reset to full range each time (zoom lost), 85 ms
+per frame against 4 ms, +18 MB traced / +43 MB RSS against +2 MB / +12 MB. It is a
+rebuild in all but name, so the private write stays, pinned by
+``test_data_wrapper_private_data_slot`` below.
+
 Signal contract (verified against ndv 0.5): ``dims_changed`` re-creates the sliders
 but leaves the old texture; only ``data_changed`` requests a re-fetch. So a shape
 change emits ``dims_changed`` then ``data_changed``; a same-shape swap emits
@@ -136,6 +146,24 @@ class TestInplaceUpdate:
         new_data = create_mock_data(shape=(20, 100, 100))
         assert viewer._try_inplace_ndv_update(new_data) is False
         wrapper.data_changed.emit.assert_not_called()
+
+
+def test_data_wrapper_private_data_slot():
+    """The one private write: ``DataWrapper.data`` must keep reading ``_data``.
+
+    If ndv renames the slot, the swap would silently show stale pixels (or ndv
+    might grow a public setter, which should replace the write).
+    """
+    import ndv
+    import xarray as xr
+
+    first = xr.DataArray(np.zeros((2, 4, 4), dtype=np.uint16), dims=["z", "y", "x"])
+    other = xr.DataArray(np.ones((2, 4, 4), dtype=np.uint16), dims=["z", "y", "x"])
+    wrapper = ndv.DataWrapper.create(first)
+
+    assert wrapper.data is wrapper._data
+    wrapper._data = other
+    assert wrapper.data is other
 
 
 @pytest.fixture(scope="module")
