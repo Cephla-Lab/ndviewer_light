@@ -3270,42 +3270,32 @@ class LightweightViewer(QWidget):
 
         Args:
             dim: Dimension name (must exist in the loaded data).
-            value: Index value to set.
+            value: Index value to set (must be within the dimension's size).
 
         Returns:
-            True if successful, False otherwise.
+            True if the index was written, False otherwise (no viewer, unknown
+            dimension, or out-of-range value; nothing is written in those cases).
         """
-        if self.ndv_viewer is None:
-            logger.debug("set_current_index: no viewer available")
-            return False
-
-        try:
-            # NDV ArrayViewer uses display_model.current_index
-            if hasattr(self.ndv_viewer, "display_model"):
-                dm = self.ndv_viewer.display_model
-                if hasattr(dm, "current_index") and dim in dm.current_index:
-                    dm.current_index[dim] = value
-                    logger.debug(f"set_current_index: {dim}={value}")
-                    return True
-
-            # Fallback for older NDV versions using dims API
-            if hasattr(self.ndv_viewer, "dims"):
-                dims = self.ndv_viewer.dims
-                if hasattr(dims, "current_step"):
-                    current = dict(dims.current_step)
-                    if dim in current:
-                        current[dim] = value
-                        dims.current_step = current
-                        logger.debug(f"set_current_index (fallback): {dim}={value}")
-                        return True
-
+        v = self.ndv_viewer
+        # ArrayViewer.data_wrapper is public on ndv 0.5 (None before data is set)
+        wrapper = v.data_wrapper if v is not None else None
+        if wrapper is None or dim not in wrapper.dims:
             logger.debug(
-                f"set_current_index: dimension '{dim}' not found or API unavailable"
+                "set_current_index: %r not in data dims %r",
+                dim,
+                getattr(wrapper, "dims", ()),
             )
             return False
-        except Exception as e:
-            logger.debug(f"set_current_index error: {e}")
+        size = wrapper.sizes()[dim]
+        if not 0 <= value < size:
+            logger.debug("set_current_index: %s=%d outside [0, %d)", dim, value, size)
             return False
+        # ValidatedEventedDict.__setitem__ -> value_changed -> _re_resolve ->
+        # _apply_changes (sliders) -> _request_data.
+        # Never guard on `dim in current_index`: on ndv 0.5 the mapping stays
+        # empty until a slider moves, so that guard made this a silent no-op.
+        v.display_model.current_index[dim] = int(value)
+        return True
 
     def get_fov_list(self) -> List[Dict]:
         """Get the list of FOVs for the currently loaded dataset.
