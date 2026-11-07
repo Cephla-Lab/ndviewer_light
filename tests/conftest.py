@@ -2,6 +2,28 @@
 
 import os
 
-# ndviewer_light is a PyQt5 app. When pytest-qt is installed alongside PyQt6 it
-# imports PyQt6 first, and vispy then refuses to load its PyQt5 backend.
-os.environ.setdefault("PYTEST_QT_API", "pyqt5")
+
+def _pin_gl_texture_limits() -> None:
+    """Answer ndv's GL texture-size query with fixed limits before any viewer exists.
+
+    ndv 0.5 queries GL_MAX_TEXTURE_SIZE on the first add_image/add_volume
+    (ndv.views._vispy._array_canvas._downcast_and_downsample ->
+    ndv.views._vispy._util.get_max_texture_sizes). With QT_QPA_PLATFORM=offscreen
+    there is no GL context and the raw glGetIntegerv segfaults (rc 139).
+    NDVL_REAL_GL=1 keeps the real query (xvfb/cocoa runs).
+    """
+    if os.environ.get("NDVL_REAL_GL") == "1":
+        return
+    import ndv.views._vispy._array_canvas as canvas_mod
+    import ndv.views._vispy._util as util_mod
+
+    def fixed_limits() -> tuple[int, int]:
+        # 3D = MAX_3D_TEXTURE_SIZE in core.py, so wrapper and ndv agree
+        return (4096, 2048)
+
+    util_mod.get_max_texture_sizes = fixed_limits
+    # the canvas module binds the name at import time
+    canvas_mod.get_max_texture_sizes = fixed_limits
+
+
+_pin_gl_texture_limits()

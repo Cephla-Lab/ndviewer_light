@@ -12,12 +12,14 @@ dependencies:
   - superqt
   - qtpy
   - vispy
-  - ndv
   - pip
   - pip:
     - tensorstore
+    # Same pin as pyproject.toml; installed via pip so the spec is identical.
+    - "ndv>=0.5,<0.6"
     # qtpy resolves a binding at import time and raises QtBindingsNotFoundError
-    # without one. Squid supplies PyQt6 when this viewer is embedded; a standalone
-    # env (this file, used by CI and for the simulate_* scripts) has to bring its
-    # own. Installed via pip rather than conda so the binding is unambiguous.
+    # without one. Squid supplies its own binding (PyQt5 by default) when this viewer
+    # is embedded; a standalone env (this file, used by CI and for the simulate_*
+    # scripts) has to bring its own. Installed via pip rather than conda so the
+    # binding is unambiguous.
     - PyQt6

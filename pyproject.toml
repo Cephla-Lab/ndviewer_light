@@ -15,14 +15,20 @@ dependencies = [
     "zarr",
     "dask",
     "xarray",
-    "superqt",
+    # [iconify] brings pyconify, which ndv 0.5's Qt view imports (QIconifyIcon).
+    "superqt[iconify]",
     # qtpy, not a concrete binding: Squid runs this viewer embedded in its own process
-    # under PyQt6, and installing a second Qt binding alongside breaks napari/vispy
-    # OpenGL rendering. The host application supplies the binding.
+    # under the binding it selected (PyQt5 by default, PyQt6 supported), and installing
+    # a second Qt binding alongside breaks napari/vispy OpenGL rendering. The host
+    # application supplies the binding.
     "qtpy",
+    # vispy stays unpinned and ndv[vispy] is deliberately not used: that extra demands
+    # vispy>=0.16 while napari (Squid's host) pins vispy<0.15.
     "vispy",
+    # 3D volume textures (ndv lists it under the vispy extra we do not depend on).
+    "pyopengl",
     "tensorstore",
-    "ndv>=0.4.0,<0.5.0",
+    "ndv>=0.5,<0.6",
 ]
 
 [project.scripts]
