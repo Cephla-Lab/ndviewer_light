@@ -96,6 +96,10 @@ def normalise_axis_names(axes: List[dict]) -> List[str]:
         else:
             lowered = raw.lower()
             names.append("fov" if lowered in _FOV_NAMES else lowered)
+    if len(set(names)) != len(names):
+        raise OmeZarrError(
+            f"Axes {[ax.get('name') for ax in axes]} normalise to duplicate names {names}"
+        )
     return names
 
 
@@ -179,6 +183,8 @@ def parse_image(group: Path, attrs: Optional[dict] = None) -> OmeZarrImage:
     channel_colors = [_color_text(ch.get("color")) for ch in channels]
 
     squid = attrs.get("_squid")
+    if squid is not None and not isinstance(squid, dict):
+        raise OmeZarrError(f"{group}: _squid is {type(squid).__name__}, not an object")
     acquisition_complete = True
     aborted = False
     if squid is not None:
@@ -281,13 +287,24 @@ def _well_fields(well_dir: Path, region: str, skipped: List[str], root: Path):
     """Entries for the images listed by a well group; absent ones are skipped."""
     images = (_read_ome(well_dir).get("ome") or {}).get("well", {}).get("images", [])
     entries = []
+    seen = set()
     for j, listed in enumerate(images):
         name = str(listed.get("path", ""))
         field_dir = well_dir / name
         if not field_dir.is_dir():
             skipped.append(_relative(field_dir, root))
             continue
-        fov = int(name) if name.isdigit() else j
+        # ASCII digits only (str.isdigit accepts other scripts); "01" and "1" are the same field
+        fov = int(name) if re.fullmatch(r"[0-9]+", name) else j
+        if fov in seen:
+            logger.warning(
+                "%s: field %r listed twice (as fov %d); the second entry is ignored",
+                well_dir,
+                name,
+                fov,
+            )
+            continue
+        seen.add(fov)
         entries.append(_entry(region, fov, _parse_existing_image(field_dir)))
     return entries
 
@@ -313,15 +330,26 @@ def _discover_plate(plate_dir: Path, plate: dict):
         ) from exc
     skipped: List[str] = []
     entries = []
+    seen_paths = set()
     for well in wells:
         try:
             well_path = well["path"]
+            if well["rowIndex"] < 0 or well["columnIndex"] < 0:
+                raise IndexError("negative index")
             region = rows[well["rowIndex"]] + columns[well["columnIndex"]]
         except (KeyError, IndexError, TypeError) as exc:
             raise OmeZarrError(
                 f"{plate_dir}: well {well.get('path')!r} has an invalid path, "
                 f"rowIndex or columnIndex ({exc!r})"
             ) from exc
+        if well_path in seen_paths:
+            logger.warning(
+                "%s: well %r listed twice; the second entry is ignored",
+                plate_dir,
+                well_path,
+            )
+            continue
+        seen_paths.add(well_path)
         well_dir = plate_dir / well_path
         if not well_dir.is_dir():
             skipped.append(_relative(well_dir, plate_dir))
@@ -371,6 +399,11 @@ def _discover_experiment_folder(root: Path):
             (_read_ome(acquisition).get("ome") or {}) if acquisition.is_dir() else {}
         )
         if "multiscales" in acquisition_ome:
+            if fov_dirs:
+                raise OmeZarrError(
+                    f"{region_dir}: holds both fov_<n>.ome.zarr stores and acquisition.zarr; "
+                    "a region is written in one layout"
+                )
             image = _parse_existing_image(acquisition)
             images.append(image)
             entries.append(_entry(region_dir.name, 0, image))
@@ -387,7 +420,9 @@ def discover_ome_zarr(root: Path) -> Tuple[List[dict], str]:
     not recognised (the caller then tries the legacy directory walk).
     """
     root = Path(root)
-    ome = _ome_attrs(root) or {}
+    # A root with a zarr.json that cannot be read is broken, not an unrecognised layout (the legacy
+    # walk would otherwise quietly open whatever arrays it finds beneath it).
+    ome = _ome_attrs_strict(root) or {}
     if "plate" in ome:
         return _discover_plate(root, ome["plate"]), "hcs_plate"
     if "well" in ome:
