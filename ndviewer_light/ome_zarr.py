@@ -287,24 +287,27 @@ def _well_fields(well_dir: Path, region: str, skipped: List[str], root: Path):
     """Entries for the images listed by a well group; absent ones are skipped."""
     images = (_read_ome(well_dir).get("ome") or {}).get("well", {}).get("images", [])
     entries = []
-    seen = set()
+    seen_paths = set()
+    used_ids = set()
     for j, listed in enumerate(images):
         name = str(listed.get("path", ""))
+        if name in seen_paths:
+            logger.warning(
+                "%s: field %r listed twice; the second entry is ignored", well_dir, name
+            )
+            continue
+        seen_paths.add(name)
         field_dir = well_dir / name
         if not field_dir.is_dir():
             skipped.append(_relative(field_dir, root))
             continue
-        # ASCII digits only (str.isdigit accepts other scripts); "01" and "1" are the same field
+        # Display id: the path when it is a plain (ASCII) number, else the position. Any
+        # path is a distinct image ("01" and "1" both are), so a colliding id moves to the
+        # next free number.
         fov = int(name) if re.fullmatch(r"[0-9]+", name) else j
-        if fov in seen:
-            logger.warning(
-                "%s: field %r listed twice (as fov %d); the second entry is ignored",
-                well_dir,
-                name,
-                fov,
-            )
-            continue
-        seen.add(fov)
+        while fov in used_ids:
+            fov = max(used_ids) + 1
+        used_ids.add(fov)
         entries.append(_entry(region, fov, _parse_existing_image(field_dir)))
     return entries
 

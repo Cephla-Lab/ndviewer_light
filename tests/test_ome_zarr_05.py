@@ -512,17 +512,27 @@ class TestReviewMinors:
         with pytest.raises(OmeZarrError, match="_squid"):
             parse_image(tmp_path / "i")
 
-    def test_field_listed_twice_in_a_well_is_read_once(self, tmp_path, caplog):
+    def test_same_field_path_listed_twice_is_read_once(self, tmp_path, caplog):
         write_plate(tmp_path / "p", {"B3": [1]}, rows=["B"], cols=[3])
         well = tmp_path / "p" / "B" / "3"
         node = json.loads((well / "zarr.json").read_text())
-        images = node["attributes"]["ome"]["well"]["images"]
-        shutil.copytree(well / "1", well / "01")
-        images.append({"path": "01"})  # "01" and "1" are the same field id
+        node["attributes"]["ome"]["well"]["images"].append({"path": "1"})
         (well / "zarr.json").write_text(json.dumps(node))
         with caplog.at_level(logging.WARNING, logger="ndviewer_light.ome_zarr"):
             fovs, _ = discover_ome_zarr(tmp_path / "p")
         assert [f["fov"] for f in fovs] == [1] and "listed twice" in caplog.text
+
+    @pytest.mark.parametrize("second", ["01", "foo"])
+    def test_distinct_paths_with_the_same_number_are_both_read(self, tmp_path, second):
+        # "01" and "1" are distinct paths under the spec; "foo" at position 1 would also derive id 1
+        write_plate(tmp_path / "p", {"B3": [1]}, rows=["B"], cols=[3])
+        well = tmp_path / "p" / "B" / "3"
+        shutil.copytree(well / "1", well / second)
+        node = json.loads((well / "zarr.json").read_text())
+        node["attributes"]["ome"]["well"]["images"].append({"path": second})
+        (well / "zarr.json").write_text(json.dumps(node))
+        fovs, _ = discover_ome_zarr(tmp_path / "p")
+        assert [(f["fov"], f["path"].name) for f in fovs] == [(1, "1"), (2, second)]
 
     def test_non_ascii_digit_field_name_falls_back_to_its_position(self, tmp_path):
         write_plate(tmp_path / "p", {"B3": [0]}, rows=["B"], cols=[3])
