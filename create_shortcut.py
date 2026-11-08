@@ -23,8 +23,14 @@ def _get_version():
 
 
 def _resolve_launch_command():
-    """Return (exe_path, None) if installed, else (python_path, module_name)."""
-    exe = shutil.which(COMMAND_NAME)
+    """Return (exe_path, None) if installed, else (python_path, module_name).
+
+    The command next to the running interpreter wins, so running this script with a
+    virtual environment's python (activated or not) points the shortcut at that
+    environment rather than at whatever ``ndviewer-light`` is first on PATH.
+    """
+    scripts_dir = str(Path(sys.executable).parent)
+    exe = shutil.which(COMMAND_NAME, path=scripts_dir) or shutil.which(COMMAND_NAME)
     if exe:
         return exe, None
     return sys.executable, MODULE_NAME
