@@ -62,4 +62,4 @@ def test_no_scale_without_physical_sizes(qapp):
 
 def test_core_imports_no_private_vispy_canvas():
     """The port removed the private ``ndv.views._vispy`` import with the patches."""
-    assert "ndv.views._vispy" not in Path(core.__file__).read_text()
+    assert "ndv.views._vispy" not in Path(core.__file__).read_text(encoding="utf-8")

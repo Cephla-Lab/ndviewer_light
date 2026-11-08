@@ -2,7 +2,9 @@
 
 import json
 import logging
+import re
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -274,7 +276,8 @@ class TestDiscover:
     def test_existing_field_without_metadata_is_broken(self, tmp_path):
         write_plate(tmp_path / "p", {"B3": [0]}, rows=["B"], cols=[3])
         (tmp_path / "p" / "B" / "3" / "0" / "zarr.json").unlink()
-        with pytest.raises(OmeZarrError, match="B/3/0"):
+        # the message names the field with the OS path separator
+        with pytest.raises(OmeZarrError, match=re.escape(str(Path("B", "3", "0")))):
             discover_ome_zarr(tmp_path / "p")
 
     def test_well_group_opened_directly(self, tmp_path):

@@ -88,7 +88,7 @@ def test_broken_fov_fails_the_load(qapp, tmp_path):
     v = load(qapp, tmp_path / "p")
     assert v._xarray_data is None
     assert v.status_label.text().startswith("Error:")
-    assert "B/3/1" in v.status_label.text()
+    assert str(Path("B", "3", "1")) in v.status_label.text()  # OS path separator
     assert v._fov_labels == []
 
 
