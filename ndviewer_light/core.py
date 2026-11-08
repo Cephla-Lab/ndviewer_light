@@ -925,25 +925,6 @@ def detect_zarr_version(path: Path) -> Optional[int]:
     return None
 
 
-class _TensorStoreArrayWrapper:
-    """Thin wrapper around a tensorstore array exposing numpy-compatible dtype.
-
-    Dask's ``from_array`` calls ``np.dtype(arr.dtype)`` internally, which fails
-    with tensorstore's own dtype objects.  This wrapper delegates all indexing
-    to the underlying tensorstore array while reporting a plain numpy dtype so
-    that dask can build its task graph without errors.
-    """
-
-    def __init__(self, ts_array):
-        self._arr = ts_array
-        self.shape = tuple(ts_array.shape)
-        self.dtype = np.dtype(ts_array.dtype.numpy_dtype)
-        self.ndim = len(ts_array.shape)
-
-    def __getitem__(self, idx):
-        return np.asarray(self._arr[idx].read().result())
-
-
 def open_zarr_tensorstore(path: Path, array_path: str = "0") -> Optional[Any]:
     """Open a zarr store using tensorstore, auto-detecting v2/v3 format.
 
@@ -3733,17 +3714,58 @@ class LightweightViewer(QWidget):
         return self._load_zarr_v3_5d(fovs)
 
     @staticmethod
-    def _open_zarr_image(image: OmeZarrImage):
-        """Dask array of an image's full-resolution array (per-plane chunks)."""
-        import dask.array as da
+    def _open_zarr_image(image: OmeZarrImage, target: List[str]):
+        """Open an image's full-resolution array; return it and its shape in ``target`` order.
 
+        The shape comes from arranging a zero-memory stand-in of the array's shape,
+        so an axis that cannot be arranged raises here, naming the array.
+        """
         ts_arr = open_zarr_tensorstore(image.group, image.array_path)
         if ts_arr is None:
             raise RuntimeError(f"cannot open {image.array_dir}")
-        shape = ts_arr.shape
-        # Wrap tensorstore array so dask sees a numpy-compatible dtype.
-        chunks = tuple(1 if i < len(shape) - 2 else s for i, s in enumerate(shape))
-        return da.from_array(_TensorStoreArrayWrapper(ts_arr), chunks=chunks)
+        stand_in = np.broadcast_to(np.zeros((), np.uint8), tuple(ts_arr.shape))
+        return ts_arr, _arrange_image_axes(stand_in, image, target).shape
+
+    @staticmethod
+    def _zarr_plane_array(planes: List[tuple], n_t, n_z, n_c, height, width, dtype):
+        """One lazy (time, fov, z, channel, y, x) dask array over many zarr images.
+
+        ``planes`` holds one ``(ts_arr, dim_names, n_fov)`` per image, in fov
+        order. Each (y, x) plane is one block, read straight from its image's
+        tensorstore array when ndv asks for it.
+
+        Built as a single ``map_blocks`` layer rather than by stacking one dask
+        array per image: with thousands of images, the stacked graph has
+        thousands of layers and dask spends 0.5-1 s ordering and optimising it
+        for every plane it reads, against ~20 ms for the read itself.
+        """
+        import dask.array as da
+
+        fov_map = [(i, f) for i, (_, _, n) in enumerate(planes) for f in range(n)]
+        chunks = (
+            (1,) * n_t,
+            (1,) * len(fov_map),
+            (1,) * n_z,
+            (1,) * n_c,
+            (height,),
+            (width,),
+        )
+
+        def load_block(block, block_info=None):
+            t, fov, z, c = block_info[None]["chunk-location"][:4]
+            image_idx, local_fov = fov_map[fov]
+            ts_arr, dim_names, _ = planes[image_idx]
+            at = {"t": t, "fov": local_fov, "z": z, "c": c}
+            index = tuple(at.get(name, slice(None)) for name in dim_names)
+            plane = np.asarray(ts_arr[index].read().result())
+            if dim_names.index("x") < dim_names.index("y"):
+                plane = plane.T
+            return plane.reshape(1, 1, 1, 1, height, width)
+
+        dummy = da.zeros(
+            (n_t, len(fov_map), n_z, n_c, height, width), chunks=chunks, dtype=dtype
+        )
+        return da.map_blocks(load_block, dummy, dtype=dtype, chunks=chunks)
 
     @staticmethod
     def _warn_dimension_names(image: OmeZarrImage) -> None:
@@ -3802,24 +3824,27 @@ class LightweightViewer(QWidget):
 
         Every FOV must open; a FOV that does not raises (no placeholder).
         """
-        import dask.array as da
-
         first = fovs[0]["image"]
         self._warn_dimension_names(first)
 
-        fov_arrays = []
+        planes = []
+        ref = None
         for fov_info in fovs:
             image = fov_info["image"]
-            darr = self._open_zarr_image(image)
-            fov_arrays.append(
-                _arrange_image_axes(darr, image, ["t", "c", "z", "y", "x"])
-            )
+            ts_arr, shape = self._open_zarr_image(image, ["t", "c", "z", "y", "x"])
+            if ref is None:
+                ref = shape
+            elif shape != ref:
+                raise OmeZarrError(
+                    f"{image.array_dir}: shape {shape} differs from {ref} "
+                    "of the first field (t, c, z, y, x)"
+                )
+            planes.append((ts_arr, image.dim_names, 1))
 
-        # Stack FOVs: (FOV, T, C, Z, Y, X) -> (T, FOV, Z, C, Y, X)
-        stacked = da.stack(fov_arrays, axis=0)
-        stacked = da.moveaxis(stacked, 0, 1)  # Now (T, FOV, C, Z, Y, X)
-        stacked = da.moveaxis(stacked, 3, 2)  # Now (T, FOV, Z, C, Y, X)
-        return self._zarr_xarray(stacked, first)
+        n_t, n_c, n_z, height, width = ref
+        dtype = np.dtype(planes[0][0].dtype.numpy_dtype)
+        darr = self._zarr_plane_array(planes, n_t, n_z, n_c, height, width, dtype)
+        return self._zarr_xarray(darr, first)
 
     def _load_zarr_v3_6d(self, fovs: List[Dict]) -> "xr.DataArray":
         """Load region images whose axes include a FOV axis.
@@ -3827,24 +3852,26 @@ class LightweightViewer(QWidget):
         Regions are concatenated along the fov axis in discovery order; their
         shapes must agree on every other axis.
         """
-        import dask.array as da
-
         target = ["t", "fov", "z", "c", "y", "x"]
         first = fovs[0]
         self._warn_dimension_names(first["image"])
-        arrays = []
+        planes = []
+        ref = None
         for fov_info in fovs:
             image = fov_info["image"]
-            darr = _arrange_image_axes(self._open_zarr_image(image), image, target)
-            if arrays:
-                ref, other = arrays[0].shape, darr.shape
-                if ref[:1] + ref[2:] != other[:1] + other[2:]:
-                    raise OmeZarrError(
-                        f"regions {first['region']} and {fov_info['region']} have "
-                        f"different shapes {ref} and {other} (t, fov, z, c, y, x)"
-                    )
-            arrays.append(darr)
-        darr = arrays[0] if len(arrays) == 1 else da.concatenate(arrays, axis=1)
+            ts_arr, shape = self._open_zarr_image(image, target)
+            if ref is None:
+                ref = shape
+            elif ref[:1] + ref[2:] != shape[:1] + shape[2:]:
+                raise OmeZarrError(
+                    f"regions {first['region']} and {fov_info['region']} have "
+                    f"different shapes {ref} and {shape} (t, fov, z, c, y, x)"
+                )
+            planes.append((ts_arr, image.dim_names, shape[1]))
+
+        n_t, _, n_z, n_c, height, width = ref
+        dtype = np.dtype(planes[0][0].dtype.numpy_dtype)
+        darr = self._zarr_plane_array(planes, n_t, n_z, n_c, height, width, dtype)
         return self._zarr_xarray(darr, first["image"])
 
     def _set_ndv_data(self, data: "xr.DataArray"):
