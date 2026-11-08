@@ -199,7 +199,7 @@ class MemoryBoundedLRUCache:
 try:
     import ndv
 
-    from ._ndv_compat import install_compact_downsample
+    from ._ndv_compat import install_compact_downsample, wrap_xarray_fast_coords
 
     NDV_AVAILABLE = True
     # ndv 0.5 strides oversized 3D textures to a view that vispy keeps alive;
@@ -3592,7 +3592,8 @@ class LightweightViewer(QWidget):
         layout = self.layout()
 
         self.ndv_viewer = ndv.ArrayViewer(
-            data,
+            # numpy coords: ndv 0.5 walks them on every slider move (see _ndv_compat)
+            wrap_xarray_fast_coords(data),
             channel_axis=channel_axis,
             channel_mode="composite",
             luts=luts,

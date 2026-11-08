@@ -58,3 +58,49 @@ def install_compact_downsample() -> None:
     setattr(compact_downsample_data, _INSTALLED_FLAG, True)
     compact_downsample_data.__wrapped__ = original
     canvas_mod.downsample_data = compact_downsample_data
+
+
+def _make_fast_coords_wrapper_class():
+    import ndv
+
+    class FastCoordsXarrayWrapper(ndv.DataWrapper):
+        """xarray wrapper whose ``coords`` are plain numpy arrays.
+
+        ndv 0.5 re-resolves the display state on every slider move, on the main
+        thread, and that walks every coordinate in Python: ``tuple(coords[d])``
+        (``_resolve._norm_data_coords``) and ``[float(v) for v in coord]``
+        (``DataWrapper.axis_scales``). The stock wrapper returns xarray's own
+        coords, and iterating one of those builds a new DataArray per element:
+        about 8,000 per move for a 2048 x 2048 image, 100-450 ms of frozen UI
+        per slider step. Iterating the underlying numpy array costs ~1 ms.
+
+        Public ndv API only (a ``DataWrapper`` subclass, passed in directly).
+        ``supports`` returns False so ``DataWrapper.create`` never picks this
+        class for other xarray objects. Remove when ndv iterates coordinate
+        values instead of DataArrays.
+        """
+
+        @classmethod
+        def supports(cls, obj) -> bool:
+            return False
+
+        @property
+        def coords(self):
+            data = self._data
+            return {
+                dim: (data.coords[dim].values if dim in data.coords else range(n))
+                for dim, n in zip(data.dims, data.shape)
+            }
+
+    return FastCoordsXarrayWrapper
+
+
+_fast_coords_cls = None
+
+
+def wrap_xarray_fast_coords(data):
+    """Wrap an ``xr.DataArray`` for ``ndv.ArrayViewer`` with fast coordinate access."""
+    global _fast_coords_cls
+    if _fast_coords_cls is None:
+        _fast_coords_cls = _make_fast_coords_wrapper_class()
+    return _fast_coords_cls(data)
