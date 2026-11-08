@@ -57,3 +57,26 @@ def test_falls_back_to_path_then_to_python_module(
 
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     assert create_shortcut._resolve_launch_command() == (str(python), "ndviewer_light")
+
+
+def test_current_directory_launcher_does_not_override_the_venv(
+    create_shortcut, tmp_path, monkeypatch
+):
+    # Python <= 3.11 on Windows searches the current directory before an explicit
+    # ``path=``; emulate that so the regression is caught on every OS.
+    real_which = create_shortcut.shutil.which
+
+    def which_cwd_first(cmd, mode=os.F_OK | os.X_OK, path=None):
+        path = os.environ.get("PATH", "") if path is None else path
+        return real_which(cmd, mode, os.pathsep.join([os.getcwd(), path]))
+
+    monkeypatch.setattr(create_shortcut.shutil, "which", which_cwd_first)
+    venv_cmd = fake_command(tmp_path / "venv" / "Scripts")
+    monkeypatch.chdir(fake_command(tmp_path / "cwd").parent)
+    monkeypatch.setattr(sys, "executable", str(venv_cmd.parent / "python.exe"))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+
+    exe, module = create_shortcut._resolve_launch_command()
+
+    assert Path(exe).resolve() == venv_cmd.resolve()
+    assert module is None

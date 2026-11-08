@@ -29,8 +29,13 @@ def _resolve_launch_command():
     virtual environment's python (activated or not) points the shortcut at that
     environment rather than at whatever ``ndviewer-light`` is first on PATH.
     """
-    scripts_dir = str(Path(sys.executable).parent)
-    exe = shutil.which(COMMAND_NAME, path=scripts_dir) or shutil.which(COMMAND_NAME)
+    # Check the sibling path directly: shutil.which(path=...) on Windows Python <= 3.11
+    # still searches the current directory first.
+    name = f"{COMMAND_NAME}.exe" if os.name == "nt" else COMMAND_NAME
+    sibling = Path(sys.executable).parent / name
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling), None
+    exe = shutil.which(COMMAND_NAME)
     if exe:
         return exe, None
     return sys.executable, MODULE_NAME
