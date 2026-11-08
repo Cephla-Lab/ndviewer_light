@@ -190,16 +190,18 @@ def parse_image(group: Path, attrs: Optional[dict] = None) -> OmeZarrImage:
             ("y", "pixel_size_um"),
             ("z", "z_step_um"),
         ):
-            if axis not in dim_names or key not in squid:
+            value = squid.get(key)
+            if axis not in dim_names or value is None:
+                # Squid writes z_step_um: null for a single-plane run (NZ == 1)
                 continue
             if axis not in scale_um:
-                scale_um[axis] = squid[key]
-            elif abs(scale_um[axis] - squid[key]) > 1e-9:
+                scale_um[axis] = value
+            elif abs(scale_um[axis] - value) > 1e-9:
                 logger.info(
                     "%s: _squid.%s=%s differs from spec scale %s on %s; using spec",
                     group,
                     key,
-                    squid[key],
+                    value,
                     scale_um[axis],
                     axis,
                 )
