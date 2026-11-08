@@ -19,6 +19,7 @@ from qtpy.QtWidgets import QApplication  # noqa: E402
 from ndviewer_light import LightweightViewer  # noqa: E402
 from tests.ome_zarr_fixtures import (  # noqa: E402
     SQUID_AXES,
+    write_array,
     write_image_group,
     write_plate,
 )
@@ -79,11 +80,81 @@ def test_plate_planes_come_from_their_field(qapp, tmp_path):
 
 
 def test_graph_size_does_not_grow_with_fields(qapp, tmp_path):
+    """The layer count is a dask-version detail (3 on 2024.9, fewer on 2026.x);
+    what matters is that it does not depend on the number of fields."""
     write_plate(tmp_path / "small", {"B3": [0]}, rows=["B"], cols=[3])
     write_plate(tmp_path / "big", {"B3": list(range(12))}, rows=["B"], cols=[3])
     small = load(tmp_path / "small")._xarray_data.data
     big = load(tmp_path / "big")._xarray_data.data
-    assert len(big.dask.layers) == len(small.dask.layers) <= 2
+    assert len(big.dask.layers) == len(small.dask.layers)
+    assert big.npartitions == 12 * small.npartitions
+
+
+def fill_value(array_dir: Path, value: int, dtype) -> None:
+    store = ts.open(
+        {"driver": "zarr3", "kvstore": {"driver": "file", "path": str(array_dir)}}
+    ).result()
+    store[...].write(np.full(tuple(store.shape), value, dtype)).result()
+
+
+def test_mixed_field_dtypes_promote_like_the_stack_did(qapp, tmp_path):
+    """Field 0 uint8, field 1 uint16 holding 60000: the array is uint16 and every
+    block comes back in that dtype (a uint8 array over uint16 blocks truncated
+    60000 to 96 downstream)."""
+    write_plate(tmp_path / "p", {"B3": [0, 1]}, rows=["B"], cols=[3])
+    write_array(tmp_path / "p" / "B" / "3" / "0" / "0", (1, 2, 3, 8, 8), dtype=np.uint8)
+    fill_value(tmp_path / "p" / "B" / "3" / "0" / "0", 7, np.uint8)
+    fill_value(tmp_path / "p" / "B" / "3" / "1" / "0", 60000, np.uint16)
+
+    data = load(tmp_path / "p")._xarray_data
+    assert data.dtype == np.uint16
+    for fov, value in ((0, 7), (1, 60000)):
+        plane = data.isel(time=0, fov=fov, z=1, channel=1).values
+        assert plane.dtype == np.uint16, f"fov={fov}"
+        assert plane.min() == plane.max() == value, f"fov={fov}"
+
+
+def test_6d_regions_mixed_dtypes_promote(qapp, tmp_path):
+    from tests.test_ome_zarr_05_viewer import _6D_NAMES, _FOV_AXES
+
+    for region, dtype, value in (("r1", np.uint8, 9), ("r2", np.uint16, 60000)):
+        array_dir = tmp_path / "run" / "zarr" / region / "acquisition.zarr"
+        write_image_group(
+            array_dir,
+            (2, 1, 2, 3, 8, 8),
+            _FOV_AXES,
+            dataset_path=".",
+            node_type="array",
+            dimension_names=_6D_NAMES,
+            dtype=dtype,
+        )
+        fill_value(array_dir, value, dtype)
+
+    data = load(tmp_path / "run")._xarray_data
+    assert data.dtype == np.uint16
+    for fov, value in ((0, 9), (2, 60000)):
+        plane = data.isel(time=0, fov=fov, z=2, channel=1).values
+        assert plane.dtype == np.uint16 and plane.min() == plane.max() == value
+
+
+@pytest.mark.parametrize(
+    "axes, shape, sizes",
+    [
+        (SQUID_AXES[:4], (1, 2, 3, 8), {"y": 8, "x": 1}),  # t c z y
+        (SQUID_AXES[:3] + [SQUID_AXES[4]], (1, 2, 3, 5), {"y": 1, "x": 5}),  # t c z x
+    ],
+)
+def test_image_missing_a_spatial_axis_reads_planes(qapp, tmp_path, axes, shape, sizes):
+    """An image with only one of y/x still loads (singleton for the other, as the
+    stacked loader did) and its planes read."""
+    write_image_group(tmp_path / "i.ome.zarr", shape, axes)
+    stored = fill_unique(tmp_path / "i.ome.zarr" / "0", seed=3)
+
+    data = load(tmp_path / "i.ome.zarr")._xarray_data
+    assert {k: data.sizes[k] for k in sizes} == sizes
+    plane = data.isel(time=0, fov=0, z=2, channel=1).values
+    assert plane.shape == (sizes["y"], sizes["x"])
+    np.testing.assert_array_equal(plane.ravel(), stored[0, 1, 2].ravel())
 
 
 def test_x_stored_before_y_is_transposed(qapp, tmp_path):

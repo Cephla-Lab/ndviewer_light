@@ -85,6 +85,7 @@ def write_image_group(
     version: str = "0.5",
     multiscale_transforms: Optional[list] = None,
     node_type: str = "group",
+    dtype=np.uint16,
 ) -> None:
     """Write an image group; node_type="array" makes the array itself the group."""
     group = Path(group)
@@ -118,7 +119,7 @@ def write_image_group(
         attributes["_squid"] = squid
 
     if node_type == "array":
-        write_array(group, shape, dimension_names)
+        write_array(group, shape, dimension_names, dtype=dtype)
         zarr_json = group / "zarr.json"
         node = json.loads(zarr_json.read_text())
         node["attributes"] = attributes
@@ -130,7 +131,7 @@ def write_image_group(
         json.dumps({"zarr_format": 3, "node_type": "group", "attributes": attributes})
     )
     array_dir = group if dataset_path == "." else group / dataset_path
-    write_array(array_dir, shape, dimension_names)
+    write_array(array_dir, shape, dimension_names, dtype=dtype)
 
 
 def _write_group(path: Path, attributes: dict) -> None:

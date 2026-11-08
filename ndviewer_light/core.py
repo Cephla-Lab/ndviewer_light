@@ -3727,6 +3727,15 @@ class LightweightViewer(QWidget):
         return ts_arr, _arrange_image_axes(stand_in, image, target).shape
 
     @staticmethod
+    def _zarr_common_dtype(planes: List[tuple]) -> np.dtype:
+        """The dtype every plane is read as: the promotion over all images' dtypes,
+        as ``da.stack`` / ``da.concatenate`` gave (a uint8 field next to a uint16
+        one makes a uint16 array, not a uint8 one that truncates 60000 to 96)."""
+        return np.result_type(
+            *(np.dtype(ts_arr.dtype.numpy_dtype) for ts_arr, _, _ in planes)
+        )
+
+    @staticmethod
     def _zarr_plane_array(planes: List[tuple], n_t, n_z, n_c, height, width, dtype):
         """One lazy (time, fov, z, channel, y, x) dask array over many zarr images.
 
@@ -3758,9 +3767,12 @@ class LightweightViewer(QWidget):
             at = {"t": t, "fov": local_fov, "z": z, "c": c}
             index = tuple(at.get(name, slice(None)) for name in dim_names)
             plane = np.asarray(ts_arr[index].read().result())
-            if dim_names.index("x") < dim_names.index("y"):
-                plane = plane.T
-            return plane.reshape(1, 1, 1, 1, height, width)
+            # Same arrangement the array's shape came from: a singleton for a
+            # missing y or x, transposed when x is stored before y.
+            spatial = [name for name in dim_names if name in ("y", "x")]
+            plane = _arrange_axes(plane, spatial, ["y", "x"])
+            # ``dtype`` is the common type of every image (as stacking promoted)
+            return plane.astype(dtype, copy=False).reshape(1, 1, 1, 1, height, width)
 
         dummy = da.zeros(
             (n_t, len(fov_map), n_z, n_c, height, width), chunks=chunks, dtype=dtype
@@ -3842,7 +3854,7 @@ class LightweightViewer(QWidget):
             planes.append((ts_arr, image.dim_names, 1))
 
         n_t, n_c, n_z, height, width = ref
-        dtype = np.dtype(planes[0][0].dtype.numpy_dtype)
+        dtype = self._zarr_common_dtype(planes)
         darr = self._zarr_plane_array(planes, n_t, n_z, n_c, height, width, dtype)
         return self._zarr_xarray(darr, first)
 
@@ -3870,7 +3882,7 @@ class LightweightViewer(QWidget):
             planes.append((ts_arr, image.dim_names, shape[1]))
 
         n_t, _, n_z, n_c, height, width = ref
-        dtype = np.dtype(planes[0][0].dtype.numpy_dtype)
+        dtype = self._zarr_common_dtype(planes)
         darr = self._zarr_plane_array(planes, n_t, n_z, n_c, height, width, dtype)
         return self._zarr_xarray(darr, first["image"])
 
