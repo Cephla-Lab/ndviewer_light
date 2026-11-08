@@ -264,7 +264,7 @@ The viewer uses ndv's public API wherever one exists:
 | Swap the displayed array without a rebuild | `ArrayViewer.data_wrapper` and the wrapper's documented `dims_changed` / `data_changed` signals | `_try_inplace_ndv_update()` |
 | Navigate | `data_wrapper.dims` / `sizes()` for validation, `display_model.current_index[dim] = value` | `set_current_index()` |
 | 3D voxel aspect | `scales={<z dim>: dz_um / pixel_size_um}` | `_set_ndv_data()` |
-| Volumes larger than the GL 3D texture limit | ndv downsamples the texture itself (strided view) and compensates the scales, so a 2100-px volume keeps its 2100-unit extent | nothing: the former `Downsampling3DXarrayWrapper` is gone |
+| Volumes larger than the GL 3D texture limit | ndv downsamples the texture itself and compensates the scales, so a 2100-px volume keeps its 2100-unit extent | `_ndv_compat.install_compact_downsample()` makes ndv's strided result own its memory (below); the former `Downsampling3DXarrayWrapper` is gone |
 
 `_try_inplace_ndv_update` emits `dims_changed` only when the shape changed (ndv then
 re-creates the sliders and re-resolves the view) and **always** `data_changed`
@@ -283,6 +283,17 @@ Each one is pinned by a test so the next ndv rename fails loudly instead of sile
   `tests/test_inplace_update.py::test_data_wrapper_private_data_slot` and window smoke S1.
 - **`display_model.current_index` written directly** (public model, no setter method on
   `ArrayViewer`). Pinned by `tests/test_set_current_index.py` and window smoke S3.
+- **`ndv.views._vispy._array_canvas.downsample_data` wrapped** by
+  `ndviewer_light/_ndv_compat.py::install_compact_downsample()` (called from `core.py`'s
+  ndv import block; `core.py` itself imports nothing private). ndv 0.5.0 strides an
+  oversized texture to a *view* and vispy's `VolumeVisual` keeps it as `_last_data`, so
+  the full-resolution (z, y, x) block of every displayed channel stayed in RAM while a
+  volume was shown (a lazy (32, 1, 64, 64) stack under a 16-voxel limit retained 256 KiB
+  for an 8 KiB texture; the old wrapper's zoomed copy retained 8 KiB). The shim copies the
+  strided result into contiguous memory and returns the same object when nothing was
+  strided. If ndv's path is gone it warns and returns (viewer works, memory retained).
+  Pinned by `tests/test_ndv_compat.py`. Remove when ndv's `downsample_data` returns a
+  contiguous copy and the pin moves past that release.
 - **superqt `QLabeledSlider.setRange` patch** at module import (superqt-private, not ndv;
   untouched by the ndv 0.5 port).
 - **Test-only:** `tests/_ndv_private.py` reads the uploaded texture
@@ -309,7 +320,9 @@ Z-step often differs from the XY pixel size. `_set_ndv_data` passes
 `scales={"z" | "z_level": dz_um / pixel_size_um}` to `ndv.ArrayViewer` whenever both sizes
 are in the array's attrs; ndv applies it as an `STTransform` on the volume and frames the
 camera to match (no vispy patching). Volumes larger than the GL 3D texture limit are
-downsampled by ndv with the scales compensated. Checked with a (3, 2100, 2100) volume,
+downsampled by ndv with the scales compensated; `_ndv_compat` makes the downsampled
+array own its memory so the full block is released (see "Private points that remain").
+Checked with a (3, 2100, 2100) volume,
 dz 1.5 µm / pixel 0.5 µm, on vispy 0.17.0 and 0.14.3: texture (3, 1050, 1050),
 `STTransform.scale` (2, 2, 3), camera x/y range (-21, 2121), z range (-0.09, 9.09).
 

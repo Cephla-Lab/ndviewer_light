@@ -199,7 +199,12 @@ class MemoryBoundedLRUCache:
 try:
     import ndv
 
+    from ._ndv_compat import install_compact_downsample
+
     NDV_AVAILABLE = True
+    # ndv 0.5 strides oversized 3D textures to a view that vispy keeps alive;
+    # hand it a compact copy instead (see _ndv_compat for the removal condition)
+    install_compact_downsample()
     # Monkeypatch superqt slider to respect full ranges (self-contained)
     try:
         from superqt.sliders import QLabeledSlider
@@ -3581,7 +3586,8 @@ class LightweightViewer(QWidget):
 
         # Recreate viewer with proper dimensions
         # Note: 3D button is always enabled - ndv 0.5 downsamples volumes that
-        # exceed the GL texture limits itself (strided view, scales compensated)
+        # exceed the GL texture limits itself (scales compensated; the result is
+        # made to own its memory by _ndv_compat.install_compact_downsample)
         old_widget = self.ndv_viewer.widget()
         layout = self.layout()
 
