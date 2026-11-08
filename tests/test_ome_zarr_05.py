@@ -17,6 +17,7 @@ from ndviewer_light.ome_zarr import (
     read_node_attrs,
 )
 from tests.ome_zarr_fixtures import (
+    DEFAULT_SCALE,
     SQUID_AXES,
     write_image_group,
     write_legacy_image,
@@ -116,6 +117,37 @@ class TestParseImage:
         image = parse_image(tmp_path / "i")
         assert image.pixel_size_um == pytest.approx(9.9)
         assert image.dz_um == pytest.approx(2.5)
+
+    def test_null_squid_values_are_ignored(self, tmp_path):
+        """Squid writes z_step_um: null for a single-plane run (NZ == 1); a None must not be
+        compared with the spec scale (it raised TypeError and no single-plane Zarr run opened).
+        """
+        write_image_group(
+            tmp_path / "i",
+            (1, 2, 1, 8, 8),
+            SQUID_AXES,
+            squid={
+                "pixel_size_um": None,
+                "z_step_um": None,
+                "acquisition_complete": True,
+            },
+        )
+        image = parse_image(tmp_path / "i")
+        assert image.scale_um["z"] == DEFAULT_SCALE["z"]
+        assert image.scale_um["x"] == DEFAULT_SCALE["x"]
+
+    def test_null_squid_value_does_not_fill_a_missing_spec_scale(self, tmp_path):
+        write_image_group(
+            tmp_path / "i", (1, 2, 1, 8, 8), SQUID_AXES, squid={"z_step_um": None}
+        )
+        zarr_json = tmp_path / "i" / "zarr.json"
+        node = json.loads(zarr_json.read_text())
+        node["attributes"]["ome"]["multiscales"][0]["datasets"][0][
+            "coordinateTransformations"
+        ] = []
+        zarr_json.write_text(json.dumps(node))
+        image = parse_image(tmp_path / "i")
+        assert "z" not in image.scale_um
 
     def test_no_squid_block_means_complete(self, tmp_path):
         write_image_group(tmp_path / "i", (1, 2, 3, 8, 8), SQUID_AXES, squid=None)
