@@ -60,6 +60,112 @@ def install_compact_downsample() -> None:
     canvas_mod.downsample_data = compact_downsample_data
 
 
+_SUPERSEDED_FLAG = "_ndviewer_light_draw_superseded"
+
+
+def install_draw_superseded_frames() -> None:
+    """Let ndv draw a late frame while only the slider position changed.
+
+    ndv 0.5.0 tags each data request with a generation and draws a response only
+    if it is from the latest one. Every slider move starts a new request, so
+    while a slider is dragged faster than a frame loads (~25-30 ms for three
+    2048 x 2048 channels), every response arrives superseded and the image stays
+    frozen until the slider stops. ndv 0.4 drew those frames.
+
+    This keeps ndv's guarantee that nothing older than what is on screen, or
+    requested before a data, shape or layout change, is ever drawn, and draws a
+    superseded response otherwise. Same logic as the upstream fix proposed to
+    ndv (``ArrayViewer._is_drawable``); a no-op once ndv has it.
+
+    Wraps private ``ArrayViewer`` methods: ``_cancel_futures`` (started fetches
+    stay tracked so their generation is known), ``_apply_changes`` and
+    ``_request_data`` (index-only requests keep earlier ones drawable),
+    ``_on_dims_changed`` (shape change: earlier requests are not) and
+    ``_on_data_response_ready`` (the drawing decision). Pinned by
+    tests/test_ndv_compat.py. Remove when the ndv pin includes the upstream fix.
+    """
+    try:
+        from ndv.controllers import ArrayViewer
+        from ndv.views import _app
+
+        cls = ArrayViewer
+        orig_cancel = cls._cancel_futures
+        orig_request = cls._request_data
+        orig_apply = cls._apply_changes
+        orig_dims = cls._on_dims_changed
+        orig_ready = cls._on_data_response_ready.__wrapped__
+        ensure_main_thread = _app.ensure_main_thread
+    except (ImportError, AttributeError) as e:
+        logger.warning(
+            "ndv's private request path changed (%s): the image may not update "
+            "while a slider is dragged",
+            e,
+        )
+        return
+    if hasattr(cls, "_is_drawable"):
+        return  # ndv has the upstream fix
+    if getattr(orig_cancel, _SUPERSEDED_FLAG, False):
+        return
+
+    def _cancel_futures(self) -> None:
+        for f in list(self._futures):
+            if f.cancel():
+                # cancel() may already have run the done callback, which pops it
+                self._futures.pop(f, None)
+        self._viewer_model.show_progress_spinner = False
+
+    def _request_data(self, *, index_only: bool = False) -> None:
+        index_only = index_only or getattr(self, "_ndvl_index_only", False)
+        orig_request(self)
+        if not index_only:
+            self._ndvl_min_gen = self._current_gen
+
+    def _apply_changes(self, old, new) -> None:
+        self._ndvl_index_only = (
+            old.visible_axes == new.visible_axes
+            and old.channel_axis == new.channel_axis
+            and old.channel_mode == new.channel_mode
+        )
+        try:
+            orig_apply(self, old, new)
+        finally:
+            self._ndvl_index_only = False
+
+    def _on_dims_changed(self) -> None:
+        self._ndvl_min_gen = self._current_gen + 1
+        orig_dims(self)
+
+    def _on_data_response_ready(self, future) -> None:
+        gen = self._futures.get(future, -1)
+        current = self._current_gen
+        drawable = not future.cancelled() and (
+            gen == current
+            or 0 <= gen
+            and getattr(self, "_ndvl_min_gen", 0) <= gen
+            and getattr(self, "_ndvl_shown_gen", -1) <= gen
+        )
+        if drawable and gen != current:
+            # ndv draws only the current generation: present this one as current
+            self._current_gen = gen
+            try:
+                orig_ready(self, future)
+            finally:
+                if self._current_gen == gen:  # unless drawing started a new request
+                    self._current_gen = current
+        else:
+            orig_ready(self, future)
+        if drawable and future.exception() is None:
+            self._ndvl_shown_gen = max(getattr(self, "_ndvl_shown_gen", -1), gen)
+
+    for fn in (_cancel_futures, _request_data, _apply_changes, _on_dims_changed):
+        setattr(fn, _SUPERSEDED_FLAG, True)
+    cls._cancel_futures = _cancel_futures
+    cls._request_data = _request_data
+    cls._apply_changes = _apply_changes
+    cls._on_dims_changed = _on_dims_changed
+    cls._on_data_response_ready = ensure_main_thread(_on_data_response_ready)
+
+
 def _make_fast_coords_wrapper_class():
     import ndv
 

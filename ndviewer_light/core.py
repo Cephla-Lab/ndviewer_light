@@ -199,12 +199,19 @@ class MemoryBoundedLRUCache:
 try:
     import ndv
 
-    from ._ndv_compat import install_compact_downsample, wrap_xarray_fast_coords
+    from ._ndv_compat import (
+        install_compact_downsample,
+        install_draw_superseded_frames,
+        wrap_xarray_fast_coords,
+    )
 
     NDV_AVAILABLE = True
     # ndv 0.5 strides oversized 3D textures to a view that vispy keeps alive;
     # hand it a compact copy instead (see _ndv_compat for the removal condition)
     install_compact_downsample()
+    # ndv 0.5 drops every frame that loads after the slider has moved on, so the
+    # image freezes while dragging; draw those frames (see _ndv_compat)
+    install_draw_superseded_frames()
     # Monkeypatch superqt slider to respect full ranges (self-contained)
     try:
         from superqt.sliders import QLabeledSlider
