@@ -12,8 +12,9 @@ context shows what reached the GPU. These three guard the paths the port touched
 
 Skipped when the Qt platform is offscreen (``window_qapp`` in conftest). Locally:
 ``QT_QPA_PLATFORM=cocoa NDVL_REAL_GL=1 pytest tests/test_window_smokes.py``; in CI
-the same under xvfb with ``QT_QPA_PLATFORM=xcb``. Waits poll the event loop and
-ndv's idle state, never sleep.
+the same under xvfb with ``QT_QPA_PLATFORM=xcb``. Waits poll the event loop,
+ndv's idle state and the texture itself (its handle appears one main-thread
+callback after idle), never sleep.
 """
 
 import time
@@ -41,10 +42,21 @@ def wait_until(qapp, predicate, timeout_s=5.0) -> bool:
 
 
 def texture_mean_is(ndv_viewer, expected: float, key: int = 0):
-    return (
-        lambda: is_idle(ndv_viewer)
-        and displayed_texture(ndv_viewer, key).mean() == expected
-    )
+    """Predicate: ndv is idle and channel ``key``'s uploaded pixels average ``expected``.
+
+    False (poll on) until the fetch has settled *and* its main-thread callback has
+    created the channel's controller and handle: ``_is_idle()`` is True as soon as
+    the worker's future is done, so right after idle the texture can still be
+    absent (``displayed_texture`` -> None). Never a skip.
+    """
+
+    def settled() -> bool:
+        if not is_idle(ndv_viewer):
+            return False
+        texture = displayed_texture(ndv_viewer, key)
+        return texture is not None and bool(texture.mean() == expected)
+
+    return settled
 
 
 def z_stack(n_z: int, voxel) -> xr.DataArray:
@@ -93,7 +105,8 @@ def test_s1_push_frames_change_texture_without_rebuild(
             window_qapp, texture_mean_is(ndv_viewer, float(frame), key=frame - 1)
         )
         assert v.ndv_viewer is ndv_viewer
-    assert displayed_texture(ndv_viewer, 0).mean() == 1.0  # BF still on channel 0
+    bf = displayed_texture(ndv_viewer, 0)
+    assert bf is not None and bf.mean() == 1.0  # BF still on channel 0
 
 
 def test_s2_shape_change_updates_slider_range_and_texture(shown_viewer, window_qapp):

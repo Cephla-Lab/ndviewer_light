@@ -96,7 +96,10 @@ jobs:
 
       # Real-GL path: xcb under Xvfb with Mesa, NDVL_REAL_GL=1 keeps ndv's real
       # texture-size query, and the window smokes run (texture-level checks of the
-      # push, shape-change and navigation paths).
+      # push, shape-change and navigation paths). The check after pytest reads the
+      # JUnit report and fails when a window smoke was skipped or none was collected:
+      # a missing GL context, an offscreen fallback or an ndv rename caught by
+      # tests/_ndv_private.py must fail this step, not pass it as "skipped".
       - name: Run tests (xcb under Xvfb, real GL query, window smokes)
         if: ${{ !cancelled() }}
         shell: bash -l {0}
@@ -105,4 +108,21 @@ jobs:
           NDVL_REAL_GL: "1"
         run: |
           conda activate ndviewer_light
-          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24 +extension GLX" python -m pytest -v
+          set -eo pipefail
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24 +extension GLX" python -m pytest -v -rs --junitxml=real-gl-junit.xml
+          python - <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          smokes = [
+              case
+              for case in ET.parse("real-gl-junit.xml").getroot().iter("testcase")
+              if case.get("classname", "").startswith("tests.test_window_smokes")
+          ]
+          skipped = [c.get("name") for c in smokes if c.find("skipped") is not None]
+          print(f"window smokes: {len(smokes)} collected, {len(skipped)} skipped")
+          if not smokes:
+              sys.exit("no window smoke was collected from tests/test_window_smokes.py")
+          if skipped:
+              sys.exit(f"window smokes must run in the real-GL step, not skip: {skipped}")
+          EOF

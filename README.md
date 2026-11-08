@@ -91,5 +91,6 @@ black .                                                             # formatting
 The test modules default to `QT_QPA_PLATFORM=offscreen`, and `tests/conftest.py` pins ndv's
 GL texture-size query there (ndv 0.5 segfaults on it without a GL context). The texture-level
 smokes (`@pytest.mark.window`) run only with a real window server and `NDVL_REAL_GL=1`; CI runs
-both configurations. `tests/README.md` describes the suite and `docs/DESIGN.md` the viewer
+both configurations and fails the real-GL run if a smoke skipped. `tests/README.md` describes
+the suite and `docs/DESIGN.md` the viewer
 design, including which ndv 0.5 APIs it relies on.

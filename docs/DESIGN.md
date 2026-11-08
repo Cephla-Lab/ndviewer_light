@@ -288,7 +288,9 @@ Each one is pinned by a test so the next ndv rename fails loudly instead of sile
 - **Test-only:** `tests/_ndv_private.py` reads the uploaded texture
   (`_lut_controllers[key].handles[0].data()`), the dims sliders
   (`_view._qwidget.dims_sliders._sliders[dim]`) and the fetch state (`_is_idle()`), and
-  `pytest.skip`s when a path is gone; `tests/conftest.py` pins
+  `pytest.skip`s only when an attribute path is gone (a key or handle ndv has not created
+  yet reads as `None` and the smokes poll on; CI's real-GL run fails if a smoke skipped);
+  `tests/conftest.py` pins
   `ndv.views._vispy._array_canvas.get_max_texture_sizes` for offscreen runs (below).
   `core.py` imports neither.
 

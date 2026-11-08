@@ -54,12 +54,19 @@ QT_QPA_PLATFORM=xcb NDVL_REAL_GL=1 xvfb-run pytest tests/                   # Li
   (`dims_changed` alone would leave the old pixels; `data_changed` must follow).
 - **S3** `set_current_index("z_level", 2)` puts plane 2 on screen.
 
-They wait by polling `processEvents()` and ndv's idle state, never by sleeping.
+They wait by polling `processEvents()`, ndv's idle state and the texture itself, never by
+sleeping: ndv's `_is_idle()` turns True as soon as the worker's future is done, one
+main-thread callback (`_on_data_response_ready`) before the channel's controller and image
+handle exist, so `displayed_texture` returns `None` in that window and the poll continues.
 
 ndv 0.5 has no public way to read the uploaded texture, the slider ranges or the fetch
 state, so `tests/_ndv_private.py` holds that access (`displayed_texture`, `dims_slider`,
-`is_idle`) and `pytest.skip`s when an attribute path is gone: an ndv rename fails one
-module loudly instead of every window test obscurely. `core.py` never imports it.
+`is_idle`). Only a missing *attribute* skips (an ndv rename fails one module loudly instead
+of every window test obscurely); a missing key or index means ndv has not created the
+object yet (`displayed_texture` -> `None`), and a dims slider ndv never built is a failure.
+`test_ndv_private_helper.py` pins those three outcomes on stand-in objects. CI's real-GL
+step reads pytest's JUnit report and fails when any smoke was skipped, so neither an
+environment failure nor a rename can pass as "skipped". `core.py` never imports it.
 
 The one private *write* the viewer still makes, `DataWrapper._data` in
 `_try_inplace_ndv_update`, is pinned by `test_inplace_update.py::test_data_wrapper_private_data_slot`;
