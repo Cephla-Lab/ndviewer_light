@@ -472,3 +472,159 @@ class TestLegacyRankInference:
             tmp_path / "old.zarr", {"axes": [], "pixel_size_um": 0.65}
         )
         assert image.dim_names == expected
+
+
+class TestReviewMinors:
+    """Deferred minors from the #42 review: fail loud on malformed metadata, dedupe listings."""
+
+    def _plate_json(self, plate):
+        return json.loads((plate / "zarr.json").read_text())
+
+    def _write_plate_json(self, plate, node):
+        (plate / "zarr.json").write_text(json.dumps(node))
+
+    def test_scale_vector_length_mismatch_raises(self, tmp_path):
+        write_image_group(tmp_path / "i", (1, 2, 3, 8, 8), SQUID_AXES)
+        zarr_json = tmp_path / "i" / "zarr.json"
+        node = json.loads(zarr_json.read_text())
+        node["attributes"]["ome"]["multiscales"][0]["datasets"][0][
+            "coordinateTransformations"
+        ] = [{"type": "scale", "scale": [1.0, 1.0]}]
+        zarr_json.write_text(json.dumps(node))
+        with pytest.raises(OmeZarrError, match="does not match 5 axes"):
+            parse_image(tmp_path / "i")
+
+    def test_axes_that_normalise_to_the_same_name_raise(self, tmp_path):
+        axes = SQUID_AXES[:3] + [
+            {"name": "y", "type": "space"},
+            {"name": "Y", "type": "space"},
+        ]
+        write_image_group(tmp_path / "i", (1, 2, 3, 8, 8), axes)
+        with pytest.raises(OmeZarrError, match="duplicate"):
+            parse_image(tmp_path / "i")
+
+    def test_non_object_squid_block_raises_ome_zarr_error(self, tmp_path):
+        write_image_group(tmp_path / "i", (1, 2, 3, 8, 8), SQUID_AXES)
+        zarr_json = tmp_path / "i" / "zarr.json"
+        node = json.loads(zarr_json.read_text())
+        node["attributes"]["_squid"] = "yes"
+        zarr_json.write_text(json.dumps(node))
+        with pytest.raises(OmeZarrError, match="_squid"):
+            parse_image(tmp_path / "i")
+
+    def test_same_field_path_listed_twice_is_read_once(self, tmp_path, caplog):
+        write_plate(tmp_path / "p", {"B3": [1]}, rows=["B"], cols=[3])
+        well = tmp_path / "p" / "B" / "3"
+        node = json.loads((well / "zarr.json").read_text())
+        node["attributes"]["ome"]["well"]["images"].append({"path": "1"})
+        (well / "zarr.json").write_text(json.dumps(node))
+        with caplog.at_level(logging.WARNING, logger="ndviewer_light.ome_zarr"):
+            fovs, _ = discover_ome_zarr(tmp_path / "p")
+        assert [f["fov"] for f in fovs] == [1] and "listed twice" in caplog.text
+
+    @pytest.mark.parametrize("second", ["01", "foo"])
+    def test_distinct_paths_with_the_same_number_are_both_read(self, tmp_path, second):
+        # "01" and "1" are distinct paths under the spec; "foo" at position 1 would also derive id 1
+        write_plate(tmp_path / "p", {"B3": [1]}, rows=["B"], cols=[3])
+        well = tmp_path / "p" / "B" / "3"
+        shutil.copytree(well / "1", well / second)
+        node = json.loads((well / "zarr.json").read_text())
+        node["attributes"]["ome"]["well"]["images"].append({"path": second})
+        (well / "zarr.json").write_text(json.dumps(node))
+        fovs, _ = discover_ome_zarr(tmp_path / "p")
+        assert [(f["fov"], f["path"].name) for f in fovs] == [(1, "1"), (2, second)]
+
+    def test_non_ascii_digit_field_name_falls_back_to_its_position(self, tmp_path):
+        write_plate(tmp_path / "p", {"B3": [0]}, rows=["B"], cols=[3])
+        well = tmp_path / "p" / "B" / "3"
+        (well / "0").rename(
+            well / "٣"
+        )  # ARABIC-INDIC DIGIT THREE: str.isdigit() is True
+        node = json.loads((well / "zarr.json").read_text())
+        node["attributes"]["ome"]["well"]["images"] = [{"path": "٣"}]
+        (well / "zarr.json").write_text(json.dumps(node))
+        fovs, _ = discover_ome_zarr(tmp_path / "p")
+        assert [f["fov"] for f in fovs] == [0]
+
+    def test_well_listed_twice_in_a_plate_is_read_once(self, tmp_path, caplog):
+        write_plate(tmp_path / "p", {"B3": [0]}, rows=["B"], cols=[3])
+        node = self._plate_json(tmp_path / "p")
+        node["attributes"]["ome"]["plate"]["wells"].append(
+            dict(node["attributes"]["ome"]["plate"]["wells"][0])
+        )
+        self._write_plate_json(tmp_path / "p", node)
+        with caplog.at_level(logging.WARNING, logger="ndviewer_light.ome_zarr"):
+            fovs, _ = discover_ome_zarr(tmp_path / "p")
+        assert [(f["region"], f["fov"]) for f in fovs] == [
+            ("B3", 0)
+        ] and "listed twice" in caplog.text
+
+    def test_negative_well_index_raises(self, tmp_path):
+        write_plate(tmp_path / "p", {"B3": [0]}, rows=["B"], cols=[3])
+        node = self._plate_json(tmp_path / "p")
+        node["attributes"]["ome"]["plate"]["wells"][0]["rowIndex"] = -1
+        self._write_plate_json(tmp_path / "p", node)
+        with pytest.raises(OmeZarrError, match="rowIndex or columnIndex"):
+            discover_ome_zarr(tmp_path / "p")
+
+    def test_absent_wells_are_reported_in_one_warning(self, tmp_path, caplog):
+        write_plate(
+            tmp_path / "p",
+            {"B3": [0], "D5": [0], "F7": [0]},
+            rows=["B", "D", "F"],
+            cols=[3, 5, 7],
+        )
+        shutil.rmtree(tmp_path / "p" / "D")
+        shutil.rmtree(tmp_path / "p" / "F")
+        with caplog.at_level(logging.WARNING, logger="ndviewer_light.ome_zarr"):
+            fovs, _ = discover_ome_zarr(tmp_path / "p")
+        assert [f["region"] for f in fovs] == ["B3"]
+        assert (
+            len(caplog.records) == 1 and "D/5" in caplog.text and "F/7" in caplog.text
+        )
+
+    def test_a_file_in_place_of_a_well_directory_is_skipped(self, tmp_path, caplog):
+        write_plate(
+            tmp_path / "p", {"B3": [0], "D5": [0]}, rows=["B", "D"], cols=[3, 5]
+        )
+        shutil.rmtree(tmp_path / "p" / "D")
+        (tmp_path / "p" / "D").write_text("not a directory")
+        with caplog.at_level(logging.WARNING, logger="ndviewer_light.ome_zarr"):
+            fovs, _ = discover_ome_zarr(tmp_path / "p")
+        assert [f["region"] for f in fovs] == ["B3"] and "D/5" in caplog.text
+
+    def test_absent_wells_under_an_experiment_folder_warn_once(self, tmp_path, caplog):
+        write_plate(
+            tmp_path / "run" / "plate.ome.zarr",
+            {"B3": [0], "D5": [0]},
+            rows=["B", "D"],
+            cols=[3, 5],
+        )
+        shutil.rmtree(tmp_path / "run" / "plate.ome.zarr" / "D")
+        with caplog.at_level(logging.WARNING, logger="ndviewer_light.ome_zarr"):
+            fovs, structure = discover_ome_zarr(tmp_path / "run")
+        assert structure == "hcs_plate" and [f["region"] for f in fovs] == ["B3"]
+        assert len(caplog.records) == 1 and "D/5" in caplog.text
+
+    def test_region_with_both_layouts_is_refused(self, tmp_path):
+        region = tmp_path / "run" / "zarr" / "r1"
+        write_image_group(region / "fov_0.ome.zarr", (1, 2, 3, 8, 8), SQUID_AXES)
+        fov_axes = [{"name": "fov", "type": "fov"}] + SQUID_AXES
+        write_image_group(
+            region / "acquisition.zarr",
+            (2, 1, 2, 3, 8, 8),
+            fov_axes,
+            dataset_path=".",
+            node_type="array",
+            dimension_names=["fov", "t", "c", "z", "y", "x"],
+        )
+        with pytest.raises(OmeZarrError, match="both"):
+            discover_ome_zarr(tmp_path / "run")
+
+    def test_corrupt_root_metadata_is_an_error_not_an_unrecognised_layout(
+        self, tmp_path
+    ):
+        write_plate(tmp_path / "p", {"B3": [0]}, rows=["B"], cols=[3])
+        (tmp_path / "p" / "zarr.json").write_text("{not json")
+        with pytest.raises(OmeZarrError, match="not valid JSON"):
+            discover_ome_zarr(tmp_path / "p")
