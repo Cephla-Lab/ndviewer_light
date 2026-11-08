@@ -3,7 +3,6 @@
 from .ndviewer_light import (
     FPATTERN,
     FPATTERN_OME,
-    MAX_3D_TEXTURE_SIZE,
     LightweightMainWindow,
     LightweightViewer,
     MemoryBoundedLRUCache,
@@ -24,7 +23,6 @@ __all__ = [
     "__version__",
     "FPATTERN",
     "FPATTERN_OME",
-    "MAX_3D_TEXTURE_SIZE",
     "LightweightMainWindow",
     "LightweightViewer",
     "MemoryBoundedLRUCache",

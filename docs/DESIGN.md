@@ -1,6 +1,6 @@
 # NDViewer Light - Design and Implementation
 
-A lightweight viewer built on [NDV](https://github.com/pyapp-kit/ndv) for viewing 5D microscopy acquisitions with support for live acquisition streaming.
+A lightweight viewer built on [NDV](https://github.com/pyapp-kit/ndv) (`ndv>=0.5,<0.6`, vispy canvas, Qt through `qtpy`) for viewing 5D microscopy acquisitions with support for live acquisition streaming. The section [ndv Integration](#ndv-integration-ndv-05) lists which ndv APIs the viewer relies on and the few private points that remain.
 
 ## Architecture Overview
 
@@ -101,7 +101,16 @@ viewer.register_image(
 ```python
 viewer.load_fov(fov=1, t=0)           # Load specific FOV
 viewer.go_to_well_fov("A2", 0)        # Navigate by well ID
+viewer.set_current_index("z", 2)      # Move one ndv slider programmatically
 ```
+
+`set_current_index(dim, value)` validates `dim` against the public
+`ArrayViewer.data_wrapper.dims` and `value` against `data_wrapper.sizes()`, then writes
+`display_model.current_index[dim] = value` (ndv's own keybindings write the same
+mapping; there is no setter method). Unknown dimensions and out-of-range values are
+rejected: the method returns `False` and the model is left untouched. It never guards on
+`dim in current_index`: on ndv 0.5 that mapping stays empty until a slider is moved
+(index resolution became pure in ndv 0.5), so such a guard made the call a silent no-op.
 
 ### Cleanup
 ```python
@@ -244,35 +253,78 @@ def _execute_debounced_load(self):
         self._load_current_fov()
 ```
 
+## ndv Integration (ndv 0.5)
+
+The viewer uses ndv's public API wherever one exists:
+
+| Need | ndv 0.5 API | Where in `core.py` |
+|------|-------------|--------------------|
+| Display an array | `ndv.ArrayViewer(data, channel_axis=..., channel_mode="composite", luts=..., visible_axes=(-2, -1), scales=...)` | `_set_ndv_data()` |
+| Channel names and colours | `luts={position: {"cmap": ..., "name": ...}}`; ndv labels each LUT row from `LUTModel.name` and falls back to the channel coordinate (`"0"`, `"1"`, ...) when it is empty | `build_luts()`, stored in `attrs["luts"]` by every array builder (push TIFF, the two zarr-push builders, OME-TIFF, single-TIFF, OME-Zarr) |
+| Swap the displayed array without a rebuild | `ArrayViewer.data_wrapper` and the wrapper's documented `dims_changed` / `data_changed` signals | `_try_inplace_ndv_update()` |
+| Navigate | `data_wrapper.dims` / `sizes()` for validation, `display_model.current_index[dim] = value` | `set_current_index()` |
+| 3D voxel aspect | `scales={<z dim>: dz_um / pixel_size_um}` | `_set_ndv_data()` |
+| Volumes larger than the GL 3D texture limit | ndv downsamples the texture itself and compensates the scales, so a 2100-px volume keeps its 2100-unit extent | `_ndv_compat.install_compact_downsample()` makes ndv's strided result own its memory (below); the former `Downsampling3DXarrayWrapper` is gone |
+
+`_try_inplace_ndv_update` emits `dims_changed` only when the shape changed (ndv then
+re-creates the sliders and re-resolves the view) and **always** `data_changed`
+afterwards: on ndv 0.5 `dims_changed` alone re-fetches only when the resolved index
+changed, so a shape change at an unchanged index would keep the old texture on screen.
+
+### Private points that remain
+
+Each one is pinned by a test so the next ndv rename fails loudly instead of silently:
+
+- **`DataWrapper._data` write** in `_try_inplace_ndv_update`: ndv has no public setter for
+  the wrapped array. The public `ArrayViewer.data = new` setter is not a substitute: it
+  clears the canvas and re-adds every image on the next data response (probe on ndv 0.5,
+  200 push frames: 85 ms per frame instead of 4 ms, camera reset each frame, 3353 vispy
+  GL objects created instead of 0; neither path leaks handles). Pinned by
+  `tests/test_inplace_update.py::test_data_wrapper_private_data_slot` and window smoke S1.
+- **`display_model.current_index` written directly** (public model, no setter method on
+  `ArrayViewer`). Pinned by `tests/test_set_current_index.py` and window smoke S3.
+- **`ndv.views._vispy._array_canvas.downsample_data` wrapped** by
+  `ndviewer_light/_ndv_compat.py::install_compact_downsample()` (called from `core.py`'s
+  ndv import block; `core.py` itself imports nothing private). ndv 0.5.0 strides an
+  oversized texture to a *view* and vispy's `VolumeVisual` keeps it as `_last_data`, so
+  the full-resolution (z, y, x) block of every displayed channel stayed in RAM while a
+  volume was shown (a lazy (32, 1, 64, 64) stack under a 16-voxel limit retained 256 KiB
+  for an 8 KiB texture; the old wrapper's zoomed copy retained 8 KiB). The shim copies the
+  strided result into contiguous memory and returns the same object when nothing was
+  strided. If ndv's path is gone it warns and returns (viewer works, memory retained).
+  Pinned by `tests/test_ndv_compat.py`. Remove when ndv's `downsample_data` returns a
+  contiguous copy and the pin moves past that release.
+- **superqt `QLabeledSlider.setRange` patch** at module import (superqt-private, not ndv;
+  untouched by the ndv 0.5 port).
+- **Test-only:** `tests/_ndv_private.py` reads the uploaded texture
+  (`_lut_controllers[key].handles[0].data()`), the dims sliders
+  (`_view._qwidget.dims_sliders._sliders[dim]`) and the fetch state (`_is_idle()`), and
+  `pytest.skip`s only when an attribute path is gone (a key or handle ndv has not created
+  yet reads as `None` and the smokes poll on; CI's real-GL run fails if a smoke skipped);
+  `tests/conftest.py` pins
+  `ndv.views._vispy._array_canvas.get_max_texture_sizes` for offscreen runs (below).
+  `core.py` imports neither.
+
+### Headless testing
+
+ndv 0.5 queries `GL_MAX_TEXTURE_SIZE` on the first `add_image` / `add_volume`. Under
+`QT_QPA_PLATFORM=offscreen` there is no GL context and the raw `glGetIntegerv` segfaults
+(rc 139), so `tests/conftest.py` answers the query with fixed limits `(4096, 2048)` before
+any viewer exists. `NDVL_REAL_GL=1` keeps the real query for runs with a window server
+(`QT_QPA_PLATFORM=cocoa` on macOS, `xcb` under Xvfb in CI); only those runs execute the
+`@pytest.mark.window` texture smokes. CI runs the suite both ways. See `tests/README.md`.
+
 ## 3D Volume Rendering
 
-### Automatic Downsampling
-For volumes exceeding OpenGL texture limits (typically 2048³):
-
-```python
-class Downsampling3DXarrayWrapper(XarrayWrapper):
-    def isel(self, index):
-        data = super().isel(index)
-
-        if exceeds_texture_limit(data.shape):
-            zoom_factors = compute_zoom_factors(data.shape, max_texture_size)
-            return ndimage_zoom(data, zoom_factors, order=0)
-
-        return data
-```
-
-### Anisotropic Voxels
-Z-step often differs from XY pixel size. Vispy VolumeVisual is patched to scale vertices:
-
-```python
-# Patch applied at module load (simplified pseudocode)
-def _patched_create_vertex_data(self):
-    ...  # existing setup code
-    scale = getattr(self, "_voxel_scale", None)
-    if scale:
-        z0, z1 = -0.5 * scale[2], (shape[0] - 0.5) * scale[2]
-        ...  # create scaled vertices using z0, z1
-```
+Z-step often differs from the XY pixel size. `_set_ndv_data` passes
+`scales={"z" | "z_level": dz_um / pixel_size_um}` to `ndv.ArrayViewer` whenever both sizes
+are in the array's attrs; ndv applies it as an `STTransform` on the volume and frames the
+camera to match (no vispy patching). Volumes larger than the GL 3D texture limit are
+downsampled by ndv with the scales compensated; `_ndv_compat` makes the downsampled
+array own its memory so the full block is released (see "Private points that remain").
+Checked with a (3, 2100, 2100) volume,
+dz 1.5 µm / pixel 0.5 µm, on vispy 0.17.0 and 0.14.3: texture (3, 1050, 1050),
+`STTransform.scale` (2, 2, 3), camera x/y range (-21, 2121), z range (-0.09, 9.09).
 
 ## Signal Flow
 
@@ -349,6 +401,6 @@ acquisition_folder/
 | Dask array setup | <1ms | No I/O, just delayed objects |
 | Single plane load (disk) | 10-15ms | Depends on disk speed |
 | Single plane load (cached) | <0.1ms | Memory access only |
-| NDV update (in-place) | <1ms | No viewer rebuild |
+| NDV update (in-place) | ~4ms to the texture (max 46ms) | No viewer rebuild; `viewer.data = new` would take ~85ms and reset the camera |
 | Slider animation | 100ms interval | 10 FPS playback |
 | Debounce interval | 200ms | Max 5 loads/sec during acquisition |

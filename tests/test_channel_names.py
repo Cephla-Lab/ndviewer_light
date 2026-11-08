@@ -4,10 +4,27 @@ Unit tests for channel name display feature in ndviewer_light.
 Tests cover:
 1. Channel name extraction and preservation logic in OME-TIFF path
 2. Channel name extraction in single-TIFF path
-3. Retry mechanism for channel label updates with generation counter
+3. Channel names reaching ndv through the public ``LUTModel.name`` field
+   (``build_luts`` -> ``ArrayViewer(luts=...)``), with no private ndv access
 """
 
+import os
+import time
 import xml.etree.ElementTree as ET
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest  # noqa: E402
+from qtpy.QtWidgets import QApplication, QCheckBox  # noqa: E402
+
+from ndviewer_light import LightweightViewer, core  # noqa: E402
+from ndviewer_light.core import (  # noqa: E402
+    extract_wavelength,
+    hex_to_colormap,
+    wavelength_to_colormap,
+)
+from tests.ome_zarr_fixtures import DEFAULT_CHANNELS, write_plate  # noqa: E402
 
 
 # Test helper to create mock OME metadata XML
@@ -225,153 +242,6 @@ class TestSingleTiffChannelNamesLogic:
         assert len(attrs["channel_names"]) == 3
 
 
-class TestChannelLabelRetryMechanism:
-    """Test retry mechanism logic for channel label updates with generation counter."""
-
-    def test_generation_counter_increments(self):
-        """Generation counter should increment on each update."""
-        # Simulate the generation counter logic from _set_ndv_data
-        generation = 0
-
-        # First update
-        generation += 1
-        assert generation == 1
-
-        # Second update
-        generation += 1
-        assert generation == 2
-
-        # Third update
-        generation += 1
-        assert generation == 3
-
-    def test_pending_retries_reset(self):
-        """Pending retries should be reset to 20 on each update."""
-        # Simulate the retry counter logic from _set_ndv_data
-        # On each new update, pending_retries is always set to 20
-        pending_retries = 20
-
-        assert pending_retries == 20
-
-    def test_stale_generation_check(self):
-        """Stale generation callbacks should be detected."""
-        # Simulate the generation check from _schedule_channel_label_update
-        current_generation = 5
-        callback_generation = 3
-
-        # Check if callback is stale
-        is_stale = current_generation != callback_generation
-
-        assert is_stale is True
-
-    def test_current_generation_check(self):
-        """Current generation callbacks should not be stale."""
-        current_generation = 5
-        callback_generation = 5
-
-        # Check if callback is stale
-        is_stale = current_generation != callback_generation
-
-        assert is_stale is False
-
-    def test_retry_counter_decrement(self):
-        """Retry counter should decrement on each retry attempt."""
-        # Simulate the retry logic from _schedule_channel_label_update
-        remaining = 10
-
-        # After one retry attempt
-        remaining = remaining - 1
-
-        assert remaining == 9
-
-    def test_retry_timeout_detection(self):
-        """Should detect when retries are exhausted."""
-        # Simulate timeout detection in _schedule_channel_label_update
-        remaining = 0
-
-        should_timeout = remaining <= 0
-
-        assert should_timeout is True
-
-    def test_retry_continues_when_retries_remain(self):
-        """Should continue retrying while retries remain."""
-        remaining = 5
-
-        should_timeout = remaining <= 0
-        should_continue = remaining > 0
-
-        assert should_timeout is False
-        assert should_continue is True
-
-
-class TestChannelLabelUpdate:
-    """Test the channel label update logic."""
-
-    def test_channel_labels_set_on_controllers(self):
-        """Should set key attribute on each LUT controller."""
-        # Simulate the update logic from _update_channel_labels
-        channel_names = ["DAPI", "GFP", "RFP"]
-
-        # Mock controllers dictionary
-        controllers = {
-            0: {"key": "Ch0"},
-            1: {"key": "Ch1"},
-            2: {"key": "Ch2"},
-        }
-
-        # Update controller keys
-        for i, name in enumerate(channel_names):
-            if i in controllers:
-                controllers[i]["key"] = name
-
-        # Verify keys were updated
-        assert controllers[0]["key"] == "DAPI"
-        assert controllers[1]["key"] == "GFP"
-        assert controllers[2]["key"] == "RFP"
-
-    def test_channel_labels_handles_fewer_controllers(self):
-        """Should handle case where there are fewer controllers than channel names."""
-        channel_names = ["DAPI", "GFP", "RFP", "Cy5"]
-
-        # Only 2 controllers available
-        controllers = {
-            0: {"key": "Ch0"},
-            1: {"key": "Ch1"},
-        }
-
-        updated_count = 0
-        # Update only existing controllers
-        for i, name in enumerate(channel_names):
-            if i in controllers:
-                controllers[i]["key"] = name
-                updated_count += 1
-
-        # Only first 2 should be updated
-        assert updated_count == 2
-        assert controllers[0]["key"] == "DAPI"
-        assert controllers[1]["key"] == "GFP"
-
-    def test_channel_labels_skips_missing_indices(self):
-        """Should skip channel indices that don't have controllers."""
-        channel_names = ["DAPI", "GFP", "RFP"]
-
-        # Controllers with gaps (missing index 1)
-        controllers = {
-            0: {"key": "Ch0"},
-            2: {"key": "Ch2"},
-        }
-
-        # Update only existing controllers
-        for i, name in enumerate(channel_names):
-            if i in controllers:
-                controllers[i]["key"] = name
-
-        # Should update only indices 0 and 2
-        assert controllers[0]["key"] == "DAPI"
-        assert 1 not in controllers  # Still missing
-        assert controllers[2]["key"] == "RFP"
-
-
 class TestChannelNamesIntegration:
     """Integration tests for channel name handling."""
 
@@ -431,3 +301,73 @@ class TestChannelNamesIntegration:
             channel_names = channel_names[:n_c]
 
         assert channel_names == ["405nm_DAPI", "488nm_GFP", "561nm_RFP"]
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    return QApplication.instance() or QApplication([])
+
+
+def model_lut_names(viewer: LightweightViewer, n_channels: int) -> list:
+    """Display names ndv holds for channel positions 0..n-1 (public LUTModel.name)."""
+    luts = viewer.ndv_viewer.display_model.luts
+    return [luts[i].name for i in range(n_channels)]
+
+
+class TestChannelNamesReachNdv:
+    """Channel names flow into ndv through LUTModel.name, set at construction.
+
+    ndv 0.5 labels each LUT row from the public ``LUTModel.name`` field and falls
+    back to the channel coordinate ("0", "1", ...) when it is empty. ndviewer_light
+    keeps integer channel coordinates, so the name must be in the ``luts`` passed to
+    ``ArrayViewer``. The viewer tests run offscreen (conftest pins the GL texture
+    query); only the checkbox test needs the event loop and polls for it.
+    """
+
+    def test_build_luts_pairs_name_with_cmap(self):
+        from ndviewer_light.core import build_luts
+
+        assert build_luts(["BF", "GFP 488"]) == {
+            0: {"cmap": wavelength_to_colormap(None), "name": "BF"},
+            1: {"cmap": wavelength_to_colormap(488), "name": "GFP 488"},
+        }
+        assert build_luts(["A"], ["#00ff00"])[0]["cmap"] == hex_to_colormap("#00ff00")
+        # Missing or empty colour entries fall back to the wavelength colormap
+        assert build_luts(["GFP", "Cy5"], [""])[0]["cmap"] == wavelength_to_colormap(
+            extract_wavelength("GFP")
+        )
+        assert build_luts(["GFP", "Cy5"], [""])[1]["cmap"] == wavelength_to_colormap(
+            extract_wavelength("Cy5")
+        )
+
+    def test_push_start_names_lut_models(self, qapp):
+        v = LightweightViewer()
+        v.start_acquisition(["BF", "GFP"], 1, 8, 8, ["A1:0"])
+        assert model_lut_names(v, 2) == ["BF", "GFP"]
+
+    def test_zarr_plate_names_lut_models(self, qapp, tmp_path):
+        write_plate(tmp_path / "plate.ome.zarr", {"B3": [0]}, rows=["B"], cols=[3])
+        v = LightweightViewer()
+        v.load_dataset(str(tmp_path / "plate.ome.zarr"))
+        assert model_lut_names(v, len(DEFAULT_CHANNELS)) == DEFAULT_CHANNELS
+
+    def test_lut_checkbox_text_matches_names(self, qapp):
+        """The LUT rows ndv creates on its first data response carry the names."""
+        names = ["BF", "GFP"]
+        v = LightweightViewer()
+        v.start_acquisition(names, 1, 8, 8, ["A1:0"])
+        deadline = time.monotonic() + 3.0
+        texts = []
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            texts = [
+                cb.text()
+                for cb in v.ndv_viewer.widget().findChildren(QCheckBox)
+                if cb.text() in names
+            ]
+            if texts == names:
+                break
+        assert texts == names
+
+    def test_core_has_no_private_lut_controller_access(self):
+        assert "_lut_controllers" not in Path(core.__file__).read_text()

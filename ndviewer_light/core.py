@@ -195,14 +195,23 @@ class MemoryBoundedLRUCache:
             return len(self._cache)
 
 
-# Module-level variable for voxel scale (used by monkey-patched add_volume)
-_current_voxel_scale: Optional[Tuple[float, float, float]] = None
-
 # NDV viewer
 try:
     import ndv
 
+    from ._ndv_compat import (
+        install_compact_downsample,
+        install_draw_superseded_frames,
+        wrap_xarray_fast_coords,
+    )
+
     NDV_AVAILABLE = True
+    # ndv 0.5 strides oversized 3D textures to a view that vispy keeps alive;
+    # hand it a compact copy instead (see _ndv_compat for the removal condition)
+    install_compact_downsample()
+    # ndv 0.5 drops every frame that loads after the slider has moved on, so the
+    # image freezes while dragging; draw those frames (see _ndv_compat)
+    install_draw_superseded_frames()
     # Monkeypatch superqt slider to respect full ranges (self-contained)
     try:
         from superqt.sliders import QLabeledSlider
@@ -226,121 +235,6 @@ try:
     except ImportError:
         pass  # superqt not available
 
-    # Monkeypatch vispy VolumeVisual to support anisotropic voxels
-    # This allows correct 3D rendering when Z step differs from XY pixel size
-    try:
-        from ndv.views._vispy._array_canvas import VispyArrayCanvas
-        from vispy.visuals.volume import VolumeVisual
-
-        if not getattr(VolumeVisual, "_voxel_scale_patch", False):
-            _orig_init = VolumeVisual.__init__
-            _orig_create_vertex_data = VolumeVisual._create_vertex_data
-
-            def _patched_init(self, *args, **kwargs):
-                """Initialize VolumeVisual and capture the current voxel scale.
-
-                Storing the scale as an instance attribute ensures thread safety
-                when multiple volumes are created concurrently - each volume
-                captures the scale that was active at its construction time.
-                """
-                _orig_init(self, *args, **kwargs)
-                # Capture the voxel scale active at construction time
-                # Use try/except to handle frozen vispy objects (e.g., napari's Volume)
-                global _current_voxel_scale
-                try:
-                    self._voxel_scale = _current_voxel_scale
-                except AttributeError:
-                    # Object is frozen (e.g., napari), skip the patch
-                    pass
-
-            VolumeVisual.__init__ = _patched_init
-
-            def _patched_create_vertex_data(self):
-                """Create vertices with Z scaling for anisotropic voxels.
-
-                Uses the instance's _voxel_scale attribute (set at construction)
-                rather than the global to ensure correct scaling even when
-                multiple volumes exist with different scales.
-
-                Falls back to original implementation when no scale is set.
-                """
-                # If no scale set, use original implementation
-                scale = getattr(self, "_voxel_scale", None)
-                if scale is None:
-                    return _orig_create_vertex_data(self)
-
-                shape = self._vol_shape
-
-                # Get corner coordinates with Z scaling
-                x0, x1 = -0.5, shape[2] - 0.5
-                y0, y1 = -0.5, shape[1] - 0.5
-
-                # Apply Z scale from instance attribute
-                sz = scale[2]
-                z0, z1 = -0.5 * sz, (shape[0] - 0.5) * sz
-
-                pos = np.array(
-                    [
-                        [x0, y0, z0],
-                        [x1, y0, z0],
-                        [x0, y1, z0],
-                        [x1, y1, z0],
-                        [x0, y0, z1],
-                        [x1, y0, z1],
-                        [x0, y1, z1],
-                        [x1, y1, z1],
-                    ],
-                    dtype=np.float32,
-                )
-
-                indices = np.array(
-                    [2, 6, 0, 4, 5, 6, 7, 2, 3, 0, 1, 5, 3, 7], dtype=np.uint32
-                )
-
-                self._vertices.set_data(pos)
-                self._index_buffer.set_data(indices)
-
-            VolumeVisual._create_vertex_data = _patched_create_vertex_data
-            VolumeVisual._voxel_scale_patch = True
-            logger.info("Voxel scale patch applied to VolumeVisual")
-
-        # Also patch add_volume to update camera range
-        if not getattr(VispyArrayCanvas, "_camera_scale_patch", False):
-            _orig_add_volume = VispyArrayCanvas.add_volume
-
-            def _patched_add_volume(self, data=None):
-                global _current_voxel_scale
-                handle = _orig_add_volume(self, data)
-                # Update camera to account for scaled Z dimension
-                if _current_voxel_scale is not None and data is not None:
-                    # Ensure data has at least 3 dimensions
-                    shape = getattr(data, "shape", None)
-                    if shape is None or len(shape) < 3:
-                        return handle
-                    try:
-                        sz = _current_voxel_scale[2]
-                        if abs(sz - 1.0) > 0.01:
-                            z_size = shape[0] * sz
-                            max_size = max(shape[1], shape[2], z_size)
-                            # Add margin to scale_factor for comfortable viewing distance
-                            self._camera.scale_factor = max_size + 6
-                            self._view.camera.set_range(
-                                x=(0, shape[2]),
-                                y=(0, shape[1]),
-                                z=(0, z_size),
-                                margin=0.01,
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to adjust camera for anisotropic voxels: %s", e
-                        )
-                return handle
-
-            VispyArrayCanvas.add_volume = _patched_add_volume
-            VispyArrayCanvas._camera_scale_patch = True
-    except ImportError:
-        pass  # vispy not available
-
 except ImportError:
     NDV_AVAILABLE = False
 
@@ -351,7 +245,6 @@ try:
     import dask.array as da
     import tifffile as tf
     import xarray as xr
-    from scipy.ndimage import zoom as ndimage_zoom
 
     LAZY_LOADING_AVAILABLE = True
 except ImportError as e:
@@ -363,178 +256,6 @@ except ImportError as e:
         stacklevel=1,
     )
     LAZY_LOADING_AVAILABLE = False
-
-# OpenGL 3D texture size limit (conservative estimate for most GPUs)
-MAX_3D_TEXTURE_SIZE = 2048
-
-# Channel label update retry configuration
-CHANNEL_LABEL_UPDATE_MAX_RETRIES = 20
-CHANNEL_LABEL_UPDATE_RETRY_DELAY_MS = 100
-
-# Register custom DataWrapper for automatic 3D downsampling
-if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
-    from collections.abc import Mapping
-
-    from ndv.models._data_wrapper import XarrayWrapper
-
-    class Downsampling3DXarrayWrapper(XarrayWrapper):
-        """XarrayWrapper that automatically downsamples 3D volumes for OpenGL.
-
-        This wrapper extends NDV's XarrayWrapper to detect when a 3D volume
-        request would exceed OpenGL texture limits and automatically downsamples
-        the data. 2D slice requests remain at full resolution.
-        """
-
-        # Higher priority than default XarrayWrapper (50)
-        PRIORITY = 40
-
-        # Class-level cache for OpenGL texture limit (queried once, shared by all instances)
-        _cached_max_texture_size: Optional[int] = None
-
-        def __init__(self, data: xr.DataArray):
-            super().__init__(data)
-
-        @classmethod
-        def _get_max_texture_size(cls) -> int:
-            """Query and cache the GPU's GL_MAX_3D_TEXTURE_SIZE.
-
-            This is queried lazily on first 3D request when OpenGL context exists.
-            Falls back to conservative default if query fails or no context available.
-            """
-            if cls._cached_max_texture_size is None:
-                try:
-                    # Check if vispy has an active GL context before querying
-                    # Calling OpenGL without a context causes segfault
-                    from vispy import app
-
-                    # Check for active vispy application - use _backend_module which
-                    # is set when a backend is actually loaded and initialized
-                    backend = getattr(app, "_backend_module", None)
-                    if backend is None:
-                        logger.debug(
-                            "No vispy backend loaded - using fallback texture size"
-                        )
-                        cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE
-                        return cls._cached_max_texture_size
-
-                    from OpenGL.GL import GL_MAX_3D_TEXTURE_SIZE, glGetIntegerv
-
-                    limit = glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE)
-                    cls._cached_max_texture_size = int(limit)
-                    logger.info(f"Detected GL_MAX_3D_TEXTURE_SIZE: {limit}")
-                except Exception as e:
-                    logger.debug(f"Failed to query GL_MAX_3D_TEXTURE_SIZE: {e}")
-                    cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE  # Fallback
-            return cls._cached_max_texture_size
-
-        @classmethod
-        def supports(cls, obj) -> bool:
-            """Check if this wrapper supports the given object."""
-            # Note: LAZY_LOADING_AVAILABLE check is unnecessary here since this
-            # class is only defined when LAZY_LOADING_AVAILABLE is True (line 85)
-            return isinstance(obj, xr.DataArray)
-
-        def isel(self, index: Mapping[int, int | slice]) -> np.ndarray:
-            """Return a slice of the data, with automatic 3D downsampling.
-
-            For 2D slices (viewing a single plane), returns full resolution.
-            For 3D volumes (viewing a stack), downsamples if needed to fit
-            within OpenGL texture limits.
-
-            Downsampling strategy:
-            - If physical pixel sizes are known (pixel_size_um, dz_um in attrs),
-              scale to maintain correct physical aspect ratio
-            - Otherwise: z scaled independently, x/y scaled uniformly
-            - channel/time/fov: never scaled
-            """
-            # Get the data using parent's implementation
-            data = super().isel(index)
-
-            # Determine which original dimensions are non-singleton
-            dims = self._data.dims
-            non_singleton_dims = []
-            for i, dim in enumerate(dims):
-                idx = index.get(i, slice(None))
-                if isinstance(idx, slice):
-                    dim_size = self._data.shape[i]
-                    start = idx.start or 0
-                    stop = idx.stop or dim_size
-                    if stop - start > 1:
-                        non_singleton_dims.append(str(dim).lower())
-
-            # Check if we have spatial z dimension (indicates 3D volume)
-            spatial_z_names = {"z", "z_level", "depth", "focus"}
-            has_z = any(d in spatial_z_names for d in non_singleton_dims)
-            if not has_z:
-                return data  # Not a 3D volume request
-
-            # Check if any spatial dimension exceeds the texture limit
-            max_texture_size = self._get_max_texture_size()
-
-            # First pass: find dimensions and their sizes in output data
-            dim_info = []  # [(dim_name, size), ...]
-            for i, dim in enumerate(dims):
-                idx = index.get(i, slice(None))
-                if isinstance(idx, int):
-                    continue  # Dropped dimension
-                dim_info.append((str(dim).lower(), data.shape[len(dim_info)]))
-
-            # Compute zoom factors for downsampling
-            zoom_factors, needs_downsampling = self._compute_simple_zoom_factors(
-                dim_info, max_texture_size, spatial_z_names
-            )
-
-            if needs_downsampling:
-                logger.info(
-                    f"Downsampling 3D volume from {data.shape} "
-                    f"(factors={[f'{z:.3f}' for z in zoom_factors]}) for OpenGL rendering"
-                )
-
-                # Use order=0 (nearest neighbor) for speed - much faster than bilinear
-                try:
-                    downsampled = ndimage_zoom(data, zoom_factors, order=0)
-                    return downsampled.astype(data.dtype)
-                except Exception as e:
-                    logger.warning(f"Downsampling failed: {e}, returning original data")
-                    return data
-
-            return data
-
-        def _compute_simple_zoom_factors(
-            self, dim_info: list, max_texture_size: int, spatial_z_names: set
-        ) -> tuple:
-            """Compute zoom factors for 3D volume downsampling.
-
-            Strategy:
-            - XY: scaled uniformly (same factor for X and Y) to preserve XY aspect ratio
-            - Z: scaled independently only if it exceeds the texture limit
-            - Non-spatial dims (channel, time, fov): never scaled
-
-            Note: Physical aspect ratio correction is handled via vertex scaling
-            in the vispy VolumeVisual patch.
-            """
-            # Calculate xy scale factor (uniform for x and y to preserve XY aspect)
-            xy_sizes = [size for name, size in dim_info if name in {"y", "x"}]
-            xy_max = max(xy_sizes) if xy_sizes else 0
-            xy_scale = max_texture_size / xy_max if xy_max > max_texture_size else 1.0
-
-            # Build zoom factors
-            zoom_factors = []
-            needs_downsampling = False
-            for dim_name, dim_size in dim_info:
-                if dim_name in {"y", "x"}:
-                    zoom_factors.append(xy_scale)
-                    if xy_scale < 1.0:
-                        needs_downsampling = True
-                elif dim_name in spatial_z_names and dim_size > max_texture_size:
-                    z_scale = max_texture_size / dim_size
-                    zoom_factors.append(z_scale)
-                    needs_downsampling = True
-                else:
-                    zoom_factors.append(1.0)
-
-            return zoom_factors, needs_downsampling
-
 
 # Filename patterns (from common.py)
 FPATTERN = re.compile(
@@ -1042,6 +763,38 @@ def hex_to_colormap(hex_color: str) -> str:
     return best_colormap
 
 
+def build_luts(
+    channel_names: List[str], channel_colors: Optional[List[str]] = None
+) -> Dict[int, Dict[str, Any]]:
+    """ndv LUTModel kwargs per channel position: colormap + display name.
+
+    The result is stored in ``attrs["luts"]`` and passed to ``ndv.ArrayViewer(luts=...)``.
+    ndv labels each LUT row from the public ``LUTModel.name`` field, falling back to the
+    channel coordinate ("0", "1", ...) when it is empty; our channel coordinates are
+    integer positions, so the name has to be here. ``cmap`` is always set because ndv
+    applies its default colour cycle to any LUT whose ``cmap`` was left unset.
+
+    Args:
+        channel_names: Display name per channel position.
+        channel_colors: Optional hex colour per position (``"#20ADF8"`` / ``"20ADF8"``);
+            a missing or empty entry falls back to the wavelength-derived colormap.
+    """
+    luts: Dict[int, Dict[str, Any]] = {}
+    for i, name in enumerate(channel_names):
+        color = (
+            channel_colors[i]
+            if channel_colors and i < len(channel_colors) and channel_colors[i]
+            else None
+        )
+        cmap = (
+            hex_to_colormap(color)
+            if color
+            else wavelength_to_colormap(extract_wavelength(name))
+        )
+        luts[i] = {"cmap": cmap, "name": name}
+    return luts
+
+
 def parse_zarr_v3_metadata(zarr_path: Path) -> dict:
     """Parse OME-NGFF metadata from zarr v3 store.
 
@@ -1539,10 +1292,6 @@ class LightweightViewer(QWidget):
         self._open_handles = []  # Keep tif handles alive when mmap is used
         self._last_sig = None
         self._refresh_timer = None
-        self._channel_label_generation = 0  # Generation counter for retry cancellation
-        self._pending_channel_label_retries = (
-            0  # Retry counter for channel label updates
-        )
 
         # External navigation state (push-based API for live acquisition)
         # _file_index is accessed from both main thread and dask workers, needs lock
@@ -1562,7 +1311,7 @@ class LightweightViewer(QWidget):
         self._push_mode_started: bool = False
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
-        self._luts: Dict[int, Any] = {}  # channel_idx -> colormap
+        self._luts: Dict[int, Any] = {}  # channel_idx -> LUTModel kwargs (cmap, name)
         self._current_fov_idx: int = 0
         self._current_time_idx: int = 0
         self._max_time_idx: int = 0  # Highest t seen (for slider range)
@@ -1859,11 +1608,8 @@ class LightweightViewer(QWidget):
         self._fov_labels = list(fov_labels)
         self._push_mode_started = True
 
-        # Set up LUTs based on channel wavelengths
-        self._luts = {
-            i: wavelength_to_colormap(extract_wavelength(c))
-            for i, c in enumerate(self._channel_names)
-        }
+        # Colormap + display name per channel (ndv labels LUT rows by LUTModel.name)
+        self._luts = build_luts(self._channel_names)
 
         # Reset navigation state
         self._current_fov_idx = 0
@@ -2378,11 +2124,8 @@ class LightweightViewer(QWidget):
         # Build channel name to index map
         self._zarr_channel_map = {name: i for i, name in enumerate(self._channel_names)}
 
-        # Set up LUTs based on channel wavelengths
-        self._luts = {
-            i: wavelength_to_colormap(extract_wavelength(c))
-            for i, c in enumerate(self._channel_names)
-        }
+        # Colormap + display name per channel (ndv labels LUT rows by LUTModel.name)
+        self._luts = build_luts(self._channel_names)
 
         # Note: Zarr stores are opened lazily in _load_zarr_plane to avoid
         # blocking I/O at acquisition start. The store may not exist yet when
@@ -2511,11 +2254,8 @@ class LightweightViewer(QWidget):
         # Build channel name to index map
         self._zarr_channel_map = {name: i for i, name in enumerate(self._channel_names)}
 
-        # Set up LUTs based on channel wavelengths
-        self._luts = {
-            i: wavelength_to_colormap(extract_wavelength(c))
-            for i, c in enumerate(self._channel_names)
-        }
+        # Colormap + display name per channel (ndv labels LUT rows by LUTModel.name)
+        self._luts = build_luts(self._channel_names)
 
         # Clear per-FOV state (not used in 6d_regions mode)
         self._zarr_fov_paths = []
@@ -3083,53 +2823,48 @@ class LightweightViewer(QWidget):
         )
 
     def _try_inplace_ndv_update(self, data: "xr.DataArray") -> bool:
-        """Update ndv data in-place to avoid memory leak (ndv#209).
+        """Swap the displayed array inside the existing ndv viewer.
 
-        Bypasses ndv's data setter which leaks GPU handles. When the data
-        shape changes, emits dims_changed to trigger slider updates without
-        rebuilding the entire viewer.
+        Avoids the full rebuild in _set_ndv_data (new ArrayViewer + widget swap),
+        which flickers and on ndv 0.4 leaked GPU handles (ndv#209). Goes through
+        the public ``ArrayViewer.data_wrapper`` and the wrapper's documented
+        ``dims_changed`` / ``data_changed`` signals ("up to data wrappers, or even
+        end-users to emit"). ``DataWrapper`` has no public setter for the wrapped
+        array, so ``wrapper._data`` is the one private write here.
+
+        Signal order matters on ndv 0.5: ``dims_changed`` re-creates the sliders
+        and re-resolves the view, but that only re-fetches when the resolved index
+        changed, so a shape change at an unchanged index would keep the old
+        texture. ``data_changed`` always requests a re-fetch, so it is emitted on
+        every swap, after ``dims_changed`` when the shape changed.
 
         Args:
             data: The new xarray DataArray to display.
 
         Returns:
-            True if in-place update succeeded, False if caller should
-            fall back to _set_ndv_data() for a full viewer rebuild.
-
-        Note:
-            Relies on ndv internal APIs (_data_model.data_wrapper._data).
-            Tested with ndv 0.4.0. May need updating if ndv internals change.
+            True when the swap happened. False when there is no viewer or no data
+            wrapper yet, or an ndv signal handler raised; the caller then falls
+            back to _set_ndv_data() for a full rebuild.
         """
         v = self.ndv_viewer
         if v is None:
             return False
 
         try:
-            wrapper = v._data_model.data_wrapper
-            if wrapper._data is None:
+            wrapper = v.data_wrapper
+            if wrapper is None:
                 return False
 
-            shape_changed = wrapper._data.shape != data.shape
+            shape_changed = wrapper.data.shape != data.shape
             wrapper._data = data
 
             if shape_changed:
-                # Emit dims_changed signal to update slider ranges without full rebuild.
-                # In ndv, this signal triggers _fully_synchronize_view() which recreates
-                # sliders based on the new data shape.
                 wrapper.dims_changed.emit()
-            else:
-                v._request_data()
+            wrapper.data_changed.emit()
 
             return True
-        except AttributeError as e:
-            # Expected when ndv version doesn't have the expected internal structure
-            logger.debug("In-place update unavailable (ndv API mismatch): %s", e)
-            return False
         except Exception as e:
-            # Unexpected error - log for debugging but allow fallback
-            logger.warning(
-                "In-place ndv update failed unexpectedly: %s", e, exc_info=True
-            )
+            logger.warning("In-place ndv update failed: %s", e, exc_info=True)
             return False
 
     def _maybe_refresh(self):
@@ -3173,8 +2908,6 @@ class LightweightViewer(QWidget):
         # When structure changes (e.g., different channels), we must rebuild the viewer
         # to avoid stale channel controls persisting from the previous dataset.
         if not structure_changed and self._try_inplace_ndv_update(data):
-            # Update channel labels for the new data
-            self._initiate_channel_label_update()
             # Close old handles after successful swap.
             self._close_tiff_handles(old_handles)
             return
@@ -3257,42 +2990,32 @@ class LightweightViewer(QWidget):
 
         Args:
             dim: Dimension name (must exist in the loaded data).
-            value: Index value to set.
+            value: Index value to set (must be within the dimension's size).
 
         Returns:
-            True if successful, False otherwise.
+            True if the index was written, False otherwise (no viewer, unknown
+            dimension, or out-of-range value; nothing is written in those cases).
         """
-        if self.ndv_viewer is None:
-            logger.debug("set_current_index: no viewer available")
-            return False
-
-        try:
-            # NDV ArrayViewer uses display_model.current_index
-            if hasattr(self.ndv_viewer, "display_model"):
-                dm = self.ndv_viewer.display_model
-                if hasattr(dm, "current_index") and dim in dm.current_index:
-                    dm.current_index[dim] = value
-                    logger.debug(f"set_current_index: {dim}={value}")
-                    return True
-
-            # Fallback for older NDV versions using dims API
-            if hasattr(self.ndv_viewer, "dims"):
-                dims = self.ndv_viewer.dims
-                if hasattr(dims, "current_step"):
-                    current = dict(dims.current_step)
-                    if dim in current:
-                        current[dim] = value
-                        dims.current_step = current
-                        logger.debug(f"set_current_index (fallback): {dim}={value}")
-                        return True
-
+        v = self.ndv_viewer
+        # ArrayViewer.data_wrapper is public on ndv 0.5 (None before data is set)
+        wrapper = v.data_wrapper if v is not None else None
+        if wrapper is None or dim not in wrapper.dims:
             logger.debug(
-                f"set_current_index: dimension '{dim}' not found or API unavailable"
+                "set_current_index: %r not in data dims %r",
+                dim,
+                getattr(wrapper, "dims", ()),
             )
             return False
-        except Exception as e:
-            logger.debug(f"set_current_index error: {e}")
+        size = wrapper.sizes()[dim]
+        if not 0 <= value < size:
+            logger.debug("set_current_index: %s=%d outside [0, %d)", dim, value, size)
             return False
+        # ValidatedEventedDict.__setitem__ -> value_changed -> _re_resolve ->
+        # _apply_changes (sliders) -> _request_data.
+        # Never guard on `dim in current_index`: on ndv 0.5 the mapping stays
+        # empty until a slider moves, so that guard made this a silent no-op.
+        v.display_model.current_index[dim] = int(value)
+        return True
 
     def get_fov_list(self) -> List[Dict]:
         """Get the list of FOVs for the currently loaded dataset.
@@ -3485,7 +3208,8 @@ class LightweightViewer(QWidget):
             elif len(channel_names) > n_c:
                 channel_names = channel_names[:n_c]
             # Keep coordinates numeric (indices) for all axes, including "channel";
-            # channel names are stored in attrs and applied via _lut_controllers.
+            # channel names travel in attrs["channel_names"] and reach ndv as
+            # LUTModel.name through attrs["luts"] (see build_luts).
             # This convention is used consistently for both OME-TIFF and single-TIFF paths.
             coords_base = {
                 axis_map.get(ax, f"ax_{ax}"): list(range(dim))
@@ -3500,10 +3224,7 @@ class LightweightViewer(QWidget):
                 else:
                     chunks.append(1)
 
-            luts = {
-                i: wavelength_to_colormap(extract_wavelength(name))
-                for i, name in enumerate(channel_names)
-            }
+            luts = build_luts(channel_names)
             n_fov = len(fovs)
 
             def open_zarr(path: str):
@@ -3629,10 +3350,7 @@ class LightweightViewer(QWidget):
                 logger.debug("Failed to read sample TIFF: %s", e)
                 return None
 
-            luts = {
-                i: wavelength_to_colormap(extract_wavelength(c))
-                for i, c in enumerate(channel_names)
-            }
+            luts = build_luts(channel_names)
 
             @lru_cache(maxsize=128)
             def load_plane(t, region, fov, z, channel):
@@ -3686,7 +3404,8 @@ class LightweightViewer(QWidget):
                 stacked,
                 dims=["time", "fov", "z", "channel", "y", "x"],
                 # Use actual values for time/z coords, numeric indices for fov/channel.
-                # Channel names are stored in attrs and applied via _lut_controllers.
+                # Channel names travel in attrs["channel_names"] and reach ndv as
+                # LUTModel.name through attrs["luts"] (see build_luts).
                 coords={
                     "time": times,
                     "fov": list(range(n_fov)),
@@ -3766,13 +3485,7 @@ class LightweightViewer(QWidget):
         if len(channel_names) != n_c:
             channel_names = [f"Ch{i}" for i in range(n_c)]
 
-        channel_colors = image.channel_colors
-        luts = {}
-        for i, name in enumerate(channel_names):
-            if i < len(channel_colors) and channel_colors[i]:
-                luts[i] = hex_to_colormap(channel_colors[i])
-            else:
-                luts[i] = wavelength_to_colormap(extract_wavelength(name))
+        luts = build_luts(channel_names, image.channel_colors)
 
         xarr = xr.DataArray(
             darr,
@@ -3849,12 +3562,10 @@ class LightweightViewer(QWidget):
 
     def _set_ndv_data(self, data: "xr.DataArray"):
         """Update NDV viewer with lazy array."""
-        global _current_voxel_scale
-
         if not NDV_AVAILABLE or not self.ndv_viewer:
             return
 
-        # Log scale information and set voxel scale for 3D rendering
+        # Log scale information
         pixel_size = data.attrs.get("pixel_size_um")
         dz = data.attrs.get("dz_um")
         if pixel_size is not None or dz is not None:
@@ -3865,31 +3576,36 @@ class LightweightViewer(QWidget):
                 scale_info.append(f"Z step: {dz:.4f} µm")
             print(f"Scale metadata: {', '.join(scale_info)}")
 
-            # Set voxel scale for 3D rendering (Z scaled relative to XY)
-            if pixel_size is not None and dz is not None and pixel_size > 0:
-                z_scale = dz / pixel_size
-                _current_voxel_scale = (1.0, 1.0, z_scale)
-                logger.info(f"Voxel aspect ratio (Z/XY): {z_scale:.2f}")
-            else:
-                _current_voxel_scale = None
-        else:
-            _current_voxel_scale = None
+        # Voxel aspect for 3D rendering through ndv's public per-axis ``scales``:
+        # the z axis is dz/pixel_size pixels tall (xy stay 1.0). ndv applies it as
+        # an STTransform on the volume and frames the camera to match.
+        scales: Dict[str, float] = {}
+        if pixel_size is not None and dz is not None and pixel_size > 0:
+            z_scale = dz / pixel_size
+            for zdim in ("z", "z_level"):
+                if zdim in data.dims:
+                    scales[zdim] = z_scale
+            logger.info(f"Voxel aspect ratio (Z/XY): {z_scale:.2f}")
 
+        # {position: {"cmap", "name"}} from build_luts; ndv labels LUT rows by name
         luts = data.attrs.get("luts", {})
         channel_axis = data.dims.index("channel") if "channel" in data.dims else None
 
         # Recreate viewer with proper dimensions
-        # Note: 3D button is always enabled - Downsampling3DXarrayWrapper handles
-        # large volumes by automatically downsampling them for OpenGL rendering
+        # Note: 3D button is always enabled - ndv 0.5 downsamples volumes that
+        # exceed the GL texture limits itself (scales compensated; the result is
+        # made to own its memory by _ndv_compat.install_compact_downsample)
         old_widget = self.ndv_viewer.widget()
         layout = self.layout()
 
         self.ndv_viewer = ndv.ArrayViewer(
-            data,
+            # numpy coords: ndv 0.5 walks them on every slider move (see _ndv_compat)
+            wrap_xarray_fast_coords(data),
             channel_axis=channel_axis,
             channel_mode="composite",
             luts=luts,
             visible_axes=(-2, -1),  # 2D display (y, x), sliders for rest
+            scales=scales,
         )
 
         # Replace widget
@@ -3897,93 +3613,6 @@ class LightweightViewer(QWidget):
         layout.removeWidget(old_widget)
         old_widget.deleteLater()
         layout.insertWidget(idx, self.ndv_viewer.widget(), 1)
-
-        # Update channel labels after viewer is ready.
-        self._initiate_channel_label_update()
-
-    def _initiate_channel_label_update(self):
-        """Start the channel label update retry mechanism.
-
-        Increments generation to cancel any pending retries from previous loads,
-        then schedules retry attempts until NDV viewer is ready.
-        """
-        self._channel_label_generation += 1
-        self._pending_channel_label_retries = CHANNEL_LABEL_UPDATE_MAX_RETRIES
-        self._schedule_channel_label_update(self._channel_label_generation)
-
-    def _schedule_channel_label_update(self, generation: int):
-        """Retry updating channel labels until the NDV viewer is ready or we time out."""
-        # Check if this callback is from a stale generation (viewer was replaced)
-        if self._channel_label_generation != generation:
-            return
-
-        if not self.ndv_viewer or self._xarray_data is None:
-            return
-
-        remaining = self._pending_channel_label_retries
-        if remaining <= 0:
-            logger.warning(
-                "Channel label update timed out - labels may show numeric indices"
-            )
-            return
-
-        # Check if _lut_controllers is available (indicates viewer is ready).
-        # Note: _lut_controllers is a private API that may change in future ndv versions;
-        # at the time of writing there is no stable public API for this behavior in ndv.
-        # If removed or renamed, this retry loop will timeout gracefully and channel
-        # labels will not be updated, falling back to numeric indices in the UI.
-        controllers = getattr(self.ndv_viewer, "_lut_controllers", None)
-        if controllers:
-            self._update_channel_labels()
-            return
-
-        # Not ready yet; schedule another check
-        self._pending_channel_label_retries = remaining - 1
-        QTimer.singleShot(
-            CHANNEL_LABEL_UPDATE_RETRY_DELAY_MS,
-            lambda: self._schedule_channel_label_update(generation),
-        )
-
-    def _update_channel_labels(self):
-        """Manually update channel labels in the NDV viewer.
-
-        This uses ndv's private _lut_controllers API to set display names.
-        The approach is fragile and may break with future ndv updates.
-        """
-        if not self.ndv_viewer or self._xarray_data is None:
-            return
-
-        channel_names = self._xarray_data.attrs.get("channel_names", [])
-        if not channel_names:
-            return
-
-        try:
-            controllers = getattr(self.ndv_viewer, "_lut_controllers", None)
-            if not controllers:
-                return
-
-            updated_names = []
-            for i, name in enumerate(channel_names):
-                if i in controllers:
-                    controller = controllers[i]
-                    controller.key = name
-                    if hasattr(controller, "synchronize"):
-                        # Propagate the updated key to the NDV UI so the channel
-                        # label is displayed in the LUT controls.
-                        controller.synchronize()
-                    else:
-                        logger.warning(
-                            "LUT controller at index %d has no 'synchronize' method; "
-                            "channel label '%s' may not appear in UI",
-                            i,
-                            name,
-                        )
-                    updated_names.append(name)
-            logger.debug(
-                "Updated %d channel labels: %s", len(updated_names), updated_names
-            )
-        except Exception as e:
-            logger.debug("Failed to update channel labels: %s", e)
 
 
 class LightweightMainWindow(QMainWindow):

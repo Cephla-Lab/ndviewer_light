@@ -53,6 +53,13 @@ xarr = self._zarr_xarray(stacked, first_image)  # dims: time, fov, z, channel, y
 A FOV that fails to open fails the whole load; the status label shows the error and
 the path. There is no placeholder.
 
+Two attrs on that xarray carry metadata into ndv (0.5) through its public constructor:
+`attrs["luts"]`, built by `build_luts(channel_names, channel_colors)` as
+`{position: {"cmap", "name"}}` and passed as `ndv.ArrayViewer(luts=...)` (ndv labels each
+LUT row from `LUTModel.name`), and `attrs["pixel_size_um"]` / `attrs["dz_um"]`, which
+`_set_ndv_data` turns into `scales={"z": dz / pixel_size}` for the 3D voxel aspect. See
+"ndv Integration" in `DESIGN.md`.
+
 Tensorstore implements the `__getitem__` protocol, so dask can treat it like a NumPy array:
 
 ```python
@@ -194,4 +201,6 @@ Channel names, colors, and pixel sizes are read from `zarr.json` metadata follow
 ## Related Files
 
 - `ndviewer_light/core.py` - Main viewer implementation (includes zarr v3 support)
+- `ndviewer_light/ome_zarr.py` - OME-Zarr 0.5 metadata reader (plate / well / image)
+- `docs/DESIGN.md` - viewer design, including the ndv 0.5 integration and its remaining private points
 - `simulate_zarr_acquisition.py` - Test script for zarr viewing

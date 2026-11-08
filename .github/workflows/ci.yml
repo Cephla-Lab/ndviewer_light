@@ -43,13 +43,86 @@ jobs:
           pip install pytest
           pip install -e .
 
-      - name: Install system dependencies for Qt
+      # Qt's xcb platform plugin needs the libxcb-* set below; from Qt 6.5 it refuses
+      # to load without libxcb-cursor0 (environment.yml installs PyQt6 unpinned, so
+      # that is the Qt in use). The Mesa packages (libgl1, libglx-mesa0,
+      # libgl1-mesa-dri, libegl-mesa0, libopengl0) give Xvfb a software GL context
+      # for the real-GL run below. This is a subset of what ndv's CI installs through
+      # pyvista/setup-headless-display-action with qt: true.
+      - name: Install system dependencies for Qt and Mesa GL
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libegl1
+          sudo apt-get install -y xvfb libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 libegl1 libgl1 libglx-mesa0 libgl1-mesa-dri libegl-mesa0 libopengl0
 
-      - name: Run tests
+      # Headless path: the Qt offscreen platform (no GL context) with ndv's
+      # GL_MAX_TEXTURE_SIZE query pinned by tests/conftest.py. The window smokes
+      # (@pytest.mark.window) skip here.
+      - name: Run tests (offscreen platform, pinned GL texture limits)
         shell: bash -l {0}
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           conda activate ndviewer_light
           xvfb-run --auto-servernum python -m pytest -v
+
+      # Before the real-GL run: load the xcb plugin and create a GL context on
+      # their own, so a plugin-load or no-GL failure shows up here with its own
+      # message instead of as a pytest failure.
+      - name: Check the xcb platform plugin and a Mesa GL context under Xvfb
+        if: ${{ !cancelled() }}
+        shell: bash -l {0}
+        env:
+          QT_QPA_PLATFORM: xcb
+        run: |
+          conda activate ndviewer_light
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24 +extension GLX" python - <<'EOF'
+          import sys
+          from qtpy import API_NAME
+          from qtpy.QtGui import QGuiApplication, QOffscreenSurface, QOpenGLContext
+
+          app = QGuiApplication(sys.argv)
+          print("qt binding:", API_NAME, "platform:", app.platformName())
+          ctx = QOpenGLContext()
+          if not ctx.create():
+              sys.exit("QOpenGLContext.create() failed: no GL context on this platform")
+          surface = QOffscreenSurface()
+          surface.create()
+          if not ctx.makeCurrent(surface):
+              sys.exit("QOpenGLContext.makeCurrent() failed")
+          fmt = ctx.format()
+          print("gl context:", fmt.majorVersion(), ".", fmt.minorVersion(), "profile", fmt.profile())
+          ctx.doneCurrent()
+          EOF
+
+      # Real-GL path: xcb under Xvfb with Mesa, NDVL_REAL_GL=1 keeps ndv's real
+      # texture-size query, and the window smokes run (texture-level checks of the
+      # push, shape-change and navigation paths). The check after pytest reads the
+      # JUnit report and fails when a window smoke was skipped or none was collected:
+      # a missing GL context, an offscreen fallback or an ndv rename caught by
+      # tests/_ndv_private.py must fail this step, not pass it as "skipped".
+      - name: Run tests (xcb under Xvfb, real GL query, window smokes)
+        if: ${{ !cancelled() }}
+        shell: bash -l {0}
+        env:
+          QT_QPA_PLATFORM: xcb
+          NDVL_REAL_GL: "1"
+        run: |
+          conda activate ndviewer_light
+          set -eo pipefail
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24 +extension GLX" python -m pytest -v -rs --junitxml=real-gl-junit.xml
+          python - <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          smokes = [
+              case
+              for case in ET.parse("real-gl-junit.xml").getroot().iter("testcase")
+              if case.get("classname", "").startswith("tests.test_window_smokes")
+          ]
+          skipped = [c.get("name") for c in smokes if c.find("skipped") is not None]
+          print(f"window smokes: {len(smokes)} collected, {len(skipped)} skipped")
+          if not smokes:
+              sys.exit("no window smoke was collected from tests/test_window_smokes.py")
+          if skipped:
+              sys.exit(f"window smokes must run in the real-GL step, not skip: {skipped}")
+          EOF
