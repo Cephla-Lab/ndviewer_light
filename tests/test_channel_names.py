@@ -370,4 +370,4 @@ class TestChannelNamesReachNdv:
         assert texts == names
 
     def test_core_has_no_private_lut_controller_access(self):
-        assert "_lut_controllers" not in Path(core.__file__).read_text()
+        assert "_lut_controllers" not in Path(core.__file__).read_text(encoding="utf-8")

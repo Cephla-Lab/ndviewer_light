@@ -109,16 +109,12 @@ QT_QPA_PLATFORM=xcb NDVL_REAL_GL=1 xvfb-run python -m pytest tests/ # Linux / CI
 black .                                                             # formatting (black<26)
 ```
 
-On Windows (PowerShell), the same with `$env:` variables; two tests read source files with the
-default encoding, so set UTF-8 mode:
+On Windows (PowerShell), the real-GL run sets the variables with `$env:`:
 
 ```powershell
-$env:PYTHONUTF8 = "1"; python -m pytest tests/                                      # offscreen
+python -m pytest tests/                                                             # offscreen
 $env:QT_QPA_PLATFORM = "windows"; $env:NDVL_REAL_GL = "1"; python -m pytest tests/  # real GL, runs the window smokes
 ```
-
-Two tests currently fail on Windows only, because they expect `/` in the paths of error
-messages: `test_existing_field_without_metadata_is_broken` and `test_broken_fov_fails_the_load`.
 
 The test modules default to `QT_QPA_PLATFORM=offscreen`, and `tests/conftest.py` pins ndv's
 GL texture-size query there (ndv 0.5 segfaults on it without a GL context). The texture-level
