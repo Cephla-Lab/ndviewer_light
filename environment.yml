@@ -4,12 +4,11 @@ channels:
 dependencies:
   - python=3.11
   - numpy
-  - scipy
   - tifffile
   - zarr
   - dask
   - xarray
-  - superqt
+  - superqt>=0.8.1
   - qtpy
   - vispy
   - pip

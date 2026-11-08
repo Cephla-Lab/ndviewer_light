@@ -10,13 +10,12 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
-    "scipy",
     "tifffile",
     "zarr",
     "dask",
     "xarray",
     # [iconify] brings pyconify, which ndv 0.5's Qt view imports (QIconifyIcon).
-    "superqt[iconify]",
+    "superqt[iconify]>=0.8.1",
     # qtpy, not a concrete binding: Squid runs this viewer embedded in its own process
     # under the binding it selected (PyQt5 by default, PyQt6 supported), and installing
     # a second Qt binding alongside breaks napari/vispy OpenGL rendering. The host

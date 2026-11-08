@@ -82,3 +82,21 @@ def is_idle(viewer: Any) -> bool:
     creates the texture handle may still be queued (see ``displayed_texture``).
     """
     return bool(_walk(viewer, "_is_idle")())
+
+
+def texture_mean_is(ndv_viewer, expected: float, key: int = 0):
+    """Predicate: ndv is idle and channel ``key``'s uploaded pixels average ``expected``.
+
+    False (poll on) until the fetch has settled *and* its main-thread callback has
+    created the channel's controller and handle: ``_is_idle()`` is True as soon as
+    the worker's future is done, so right after idle the texture can still be
+    absent (``displayed_texture`` -> None). Never a skip.
+    """
+
+    def settled() -> bool:
+        if not is_idle(ndv_viewer):
+            return False
+        texture = displayed_texture(ndv_viewer, key)
+        return texture is not None and bool(texture.mean() == expected)
+
+    return settled

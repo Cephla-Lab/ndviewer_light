@@ -25,7 +25,7 @@ import tifffile
 import xarray as xr
 
 from ndviewer_light import LightweightViewer
-from tests._ndv_private import dims_slider, displayed_texture, is_idle
+from tests._ndv_private import dims_slider, displayed_texture, texture_mean_is
 
 pytestmark = pytest.mark.window
 
@@ -39,24 +39,6 @@ def wait_until(qapp, predicate, timeout_s=5.0) -> bool:
         if predicate():
             return True
     return predicate()
-
-
-def texture_mean_is(ndv_viewer, expected: float, key: int = 0):
-    """Predicate: ndv is idle and channel ``key``'s uploaded pixels average ``expected``.
-
-    False (poll on) until the fetch has settled *and* its main-thread callback has
-    created the channel's controller and handle: ``_is_idle()`` is True as soon as
-    the worker's future is done, so right after idle the texture can still be
-    absent (``displayed_texture`` -> None). Never a skip.
-    """
-
-    def settled() -> bool:
-        if not is_idle(ndv_viewer):
-            return False
-        texture = displayed_texture(ndv_viewer, key)
-        return texture is not None and bool(texture.mean() == expected)
-
-    return settled
 
 
 def z_stack(n_z: int, voxel) -> xr.DataArray:

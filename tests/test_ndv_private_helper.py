@@ -7,7 +7,7 @@ window smoke that polls right after idle legitimately looks before they exist.
 That must read as "poll again" (``displayed_texture`` -> None, ``texture_mean_is``
 -> False), never as a skip blaming an ndv rename; only a missing *attribute* (the
 path itself is gone) skips, and a dims slider ndv never built is a failure.
-Stand-in objects, no Qt, no ndv.
+Stand-in viewer objects; no window.
 """
 
 import os
@@ -19,8 +19,12 @@ from types import SimpleNamespace  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-from tests._ndv_private import dims_slider, displayed_texture, is_idle  # noqa: E402
-from tests.test_window_smokes import texture_mean_is  # noqa: E402
+from tests._ndv_private import (  # noqa: E402
+    dims_slider,
+    displayed_texture,
+    is_idle,
+    texture_mean_is,
+)
 
 
 def viewer_with(controllers: dict) -> SimpleNamespace:
