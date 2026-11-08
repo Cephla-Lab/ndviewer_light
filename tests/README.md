@@ -36,7 +36,7 @@ pytest tests/test_channel_names.py::TestOMETiffChannelNamesLogic::test_empty_cha
 
 ## Window smokes and ndv private access
 
-Most tests run under `QT_QPA_PLATFORM=offscreen` (the viewer modules `setdefault` it at
+Most tests run under `QT_QPA_PLATFORM=offscreen` (the test modules `setdefault` it at
 import) and `conftest.py` pins ndv's GL texture-size query so no GL context is needed.
 Three texture-level smokes in `test_window_smokes.py` need a real window instead: they
 carry `@pytest.mark.window` and skip when the live Qt platform is offscreen (the

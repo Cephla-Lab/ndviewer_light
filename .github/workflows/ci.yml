@@ -43,13 +43,34 @@ jobs:
           pip install pytest
           pip install -e .
 
-      - name: Install system dependencies for Qt
+      # The Mesa packages (libgl1, libglx-mesa0, libgl1-mesa-dri, libegl-mesa0) give
+      # Xvfb a software GL context for the real-GL run below; ndv's own CI installs
+      # the same set.
+      - name: Install system dependencies for Qt and Mesa GL
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libegl1
+          sudo apt-get install -y xvfb libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libegl1 libgl1 libglx-mesa0 libgl1-mesa-dri libegl-mesa0
 
-      - name: Run tests
+      # Headless path: the Qt offscreen platform (no GL context) with ndv's
+      # GL_MAX_TEXTURE_SIZE query pinned by tests/conftest.py. The window smokes
+      # (@pytest.mark.window) skip here.
+      - name: Run tests (offscreen platform, pinned GL texture limits)
         shell: bash -l {0}
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           conda activate ndviewer_light
           xvfb-run --auto-servernum python -m pytest -v
+
+      # Real-GL path: xcb under Xvfb with Mesa, NDVL_REAL_GL=1 keeps ndv's real
+      # texture-size query, and the window smokes run (texture-level checks of the
+      # push, shape-change and navigation paths).
+      - name: Run tests (xcb under Xvfb, real GL query, window smokes)
+        if: ${{ !cancelled() }}
+        shell: bash -l {0}
+        env:
+          QT_QPA_PLATFORM: xcb
+          NDVL_REAL_GL: "1"
+        run: |
+          conda activate ndviewer_light
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24 +extension GLX" python -m pytest -v
